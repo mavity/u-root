@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// gpgv validates a signature against a file.
+// Package gpgv validates a signature against a file.
 //
 // Synopsis:
 //
@@ -12,24 +12,19 @@
 //
 //	It prints "OK\n" to stdout if the check succeeds and exits with 0. It
 //	prints an error message and exits with non-0 otherwise.
-//
-//	The openpgp package ReadKeyRing function does not completely implement
-//	RFC4880 in that it can't use a PublicSigningKey with 0 signatures. We
-//	use one from Eric Grosse instead.
-//
-// Author:
-//
-//	grosse@gmail.com.
-package main
+package gpgv
 
 import (
+	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
 	"github.com/ProtonMail/go-crypto/openpgp/packet"
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 var (
@@ -72,10 +67,26 @@ func verifyDetachedSignature(key *packet.PublicKey, contentf, sigf io.Reader) er
 	return key.VerifySignature(h, sig)
 }
 
-func runGPGV(w io.Writer, keyfile, sigfile, datafile string) error {
-	if keyfile == "" || sigfile == "" || datafile == "" {
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	fs := flag.NewFlagSet("gpgv", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: gpgv [options] key sig content\n\n")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
+
+	rest := fs.Args()
+	if len(rest) != 3 {
 		return errUsage
 	}
+
+	keyfile := ioEnv.ResolvePath(rest[0])
+	sigfile := ioEnv.ResolvePath(rest[1])
+	datafile := ioEnv.ResolvePath(rest[2])
 
 	keyf, err := os.Open(keyfile)
 	if err != nil {
@@ -95,23 +106,44 @@ func runGPGV(w io.Writer, keyfile, sigfile, datafile string) error {
 	}
 	defer contentf.Close()
 
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
 	key, err := readPublicSigningKey(keyf)
 	if err != nil {
-		return fmt.Errorf("key: %w ", err)
+		return fmt.Errorf("key: %w", err)
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
 
 	if err = verifyDetachedSignature(key, contentf, sigf); err != nil {
 		return fmt.Errorf("verify: %w", err)
 	}
-	fmt.Fprintf(w, "OK")
+	fmt.Fprintln(ioEnv.Stdout, "OK")
 	return nil
 }
 
-func main() {
-	if len(os.Args) != 4 {
-		log.Fatal(errUsage)
+// Main runs the gpgv command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "gpgv: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "gpgv: %v\n", err)
+		}
+		return 1
 	}
-	if err := runGPGV(os.Stdout, os.Args[1], os.Args[2], os.Args[3]); err != nil {
-		log.Fatal(err)
-	}
+	return 0
 }

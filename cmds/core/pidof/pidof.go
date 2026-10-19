@@ -2,18 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build linux
-
-package main
+package pidof
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"strings"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 var errNotFound = errors.New("pid name not found")
@@ -55,14 +55,38 @@ func run(stdout io.Writer, procPath string, single, quiet bool, args []string) e
 	return nil
 }
 
-func main() {
-	single := flag.Bool("s", false, "single shot - this instructs the program to only return one pid")
-	quiet := flag.Bool("q", false, "do not display matched PIDs to standard out")
-	flag.Parse()
-	if err := run(os.Stdout, procPath, *single, *quiet, flag.Args()); err != nil {
-		if errors.Is(err, errNotFound) {
-			os.Exit(1)
+// Main runs the pidof command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "pidof: panic: %v\n", r)
+			exitCode = 1
 		}
-		log.Fatal(err)
+	}()
+
+	fs := flag.NewFlagSet("pidof", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	single := fs.Bool("s", false, "single shot - this instructs the program to only return one pid")
+	quiet := fs.Bool("q", false, "do not display matched PIDs to standard out")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
 	}
+
+	if len(fs.Args()) == 0 {
+		return 1
+	}
+
+	if err := run(ioEnv.Stdout, procPath, *single, *quiet, fs.Args()); err != nil {
+		if errors.Is(err, errNotFound) {
+			return 1
+		}
+		fmt.Fprintf(ioEnv.Stderr, "pidof: %v\n", err)
+		return 1
+	}
+	return 0
 }

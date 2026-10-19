@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package dd
 
 import (
 	"bufio"
@@ -158,9 +158,12 @@ func TestInFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := inFile(&bytes.Buffer{}, p, tt.outputBytes, tt.seek, tt.count)
+			r, err := inFile(&bytes.Buffer{}, p, tt.outputBytes, tt.seek, tt.count)
 			if err != nil && !tt.wantErr {
 				t.Errorf("outFile failed with %v", err)
+			}
+			if c, ok := r.(io.Closer); ok {
+				_ = c.Close()
 			}
 		})
 	}
@@ -235,9 +238,12 @@ func TestOutFile(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := outFile(&ws{Writer: &bytes.Buffer{}}, p, tt.outputBytes, tt.seek, tt.flags)
+			w, err := outFile(&ws{Writer: &bytes.Buffer{}}, p, tt.outputBytes, tt.seek, tt.flags)
 			if err != nil && !tt.wantErr {
 				t.Errorf("outFile failed with %v", err)
+			}
+			if c, ok := w.(io.Closer); ok {
+				_ = c.Close()
 			}
 		})
 	}

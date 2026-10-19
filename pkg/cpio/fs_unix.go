@@ -16,7 +16,6 @@ import (
 
 	"github.com/u-root/u-root/pkg/ls"
 	"github.com/u-root/uio/uio"
-	"golang.org/x/sys/unix"
 )
 
 var modeMap = map[uint64]os.FileMode{
@@ -58,13 +57,13 @@ func setModes(root *os.Root, r Record) error {
 
 func toFileMode(r Record) os.FileMode {
 	m := os.FileMode(perm(r))
-	if r.Mode&unix.S_ISUID != 0 {
+	if r.Mode&S_ISUID != 0 {
 		m |= os.ModeSetuid
 	}
-	if r.Mode&unix.S_ISGID != 0 {
+	if r.Mode&S_ISGID != 0 {
 		m |= os.ModeSetgid
 	}
-	if r.Mode&unix.S_ISVTX != 0 {
+	if r.Mode&S_ISVTX != 0 {
 		m |= os.ModeSticky
 	}
 	return m
@@ -295,7 +294,7 @@ func LSInfoFromRecord(rec Record) ls.FileInfo {
 	return ls.FileInfo{
 		Name:          rec.Name,
 		Mode:          mode,
-		Rdev:          unix.Mkdev(uint32(rec.Rmajor), uint32(rec.Rminor)),
+		Rdev:          (rec.Rmajor << 8) | rec.Rminor,
 		UID:           uint32(rec.UID),
 		GID:           uint32(rec.GID),
 		Size:          int64(rec.FileSize),

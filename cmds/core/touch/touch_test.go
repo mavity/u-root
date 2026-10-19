@@ -1,14 +1,18 @@
 // Copyright 2023 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-package main
+package touch
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestParseParamsDate(t *testing.T) {
@@ -105,7 +109,7 @@ func TestTouchEmptyDir(t *testing.T) {
 	}{
 		{
 			name:     "create is true, no new files created",
-			args:     []string{"touch", "-amc", "-d", ts},
+			args:     []string{"-amc", "-d", ts},
 			fileArgs: []string{"a1", "a2"},
 			p: params{
 				access:       true,
@@ -116,7 +120,7 @@ func TestTouchEmptyDir(t *testing.T) {
 		},
 		{
 			name:     "create is false, files should be created",
-			args:     []string{"touch", "-a", "-m", "-d", ts},
+			args:     []string{"-a", "-m", "-d", ts},
 			fileArgs: []string{"a1", "a2"},
 			p: params{
 				access:       true,
@@ -127,7 +131,7 @@ func TestTouchEmptyDir(t *testing.T) {
 		},
 		{
 			name:     "no such file or directory",
-			args:     []string{"touch"},
+			args:     []string{},
 			fileArgs: []string{"no/such/file/or/directory"},
 			p: params{
 				create: false,
@@ -135,8 +139,8 @@ func TestTouchEmptyDir(t *testing.T) {
 			runErr: os.ErrNotExist,
 		},
 		{
-			name: "no such file or directory",
-			args: []string{"touch"},
+			name: "no files specified",
+			args: []string{},
 			p: params{
 				create: false,
 			},
@@ -151,7 +155,8 @@ func TestTouchEmptyDir(t *testing.T) {
 			fileArgs = append(fileArgs, filepath.Join(temp, arg))
 		}
 
-		c, err := command(append(test.args, fileArgs...)...)
+		ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+		c, err := parseCommand(ioEnv, append(test.args, fileArgs...)...)
 		if !errors.Is(err, test.commandErr) {
 			t.Fatalf("command() expected %v, got %v", test.commandErr, err)
 		}
@@ -159,7 +164,7 @@ func TestTouchEmptyDir(t *testing.T) {
 			continue
 		}
 
-		err = c.run()
+		err = c.run(context.Background(), ioEnv)
 		if !errors.Is(err, test.runErr) {
 			t.Fatalf("command() expected %v, got %v", test.runErr, err)
 		}
@@ -189,7 +194,6 @@ func TestTouchEmptyDir(t *testing.T) {
 					}
 				}
 			}
-
 		}
 	}
 }

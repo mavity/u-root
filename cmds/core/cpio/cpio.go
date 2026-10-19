@@ -2,75 +2,86 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// cpio operates on cpio files using a cpio package
-// It only implements basic cpio options.
-//
-// Synopsis:
-//
-//	cpio
-//
-// Description:
-//
-// Options:
-//
-//	o: output an archive to stdout given a pattern
-//	i: output files from a stdin stream
-//	t: print table of contents
-//	-v: debug prints
-//
-// Bugs: in i mode, it can't use non-seekable stdin, i.e. a pipe. Yep, this sucks.
-// But if we implement seek on such things, we have to do it by reading, which
-// really sucks. It's doable, we'll do it if we have to, but for now I'd like
-// to avoid the complexity. cpio is a 40 year old concept. If you want something
-// better, see ../archive which has a VTOC and separates data from metadata (unlike cpio).
-// We could test for ESPIPE and fix it that way ... later.
-package main
+// Package cpiocmd operates on cpio files using the pkg/cpio package.
+package cpiocmd
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/cpio"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-var (
-	debug  = func(string, ...any) {}
-	d      = flag.Bool("v", false, "Debug prints")
-	format = flag.String("H", "newc", "format")
+var errInvalidArgs = errors.New("usage: cpio [-H format] [-v] i|o|t")
 
-	errInvalidArgs = errors.New("usage of the command:\ncpio o < name-list [> archive]\ncpio i [< archive]\ncpio p destination-directory < name-list\nOptions: -H format (default: newc) -v Debug prints ")
-)
+func readerAtFromStdin(r io.Reader) (io.ReaderAt, error) {
+	if ra, ok := r.(io.ReaderAt); ok {
+		if f, isFile := r.(*os.File); !isFile {
+			return ra, nil
+		} else if _, err := f.Seek(0, io.SeekCurrent); err == nil {
+			return ra, nil
+		}
+	}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(data), nil
+}
 
-func run(args []string, stdin *os.File, stdout io.Writer, d bool, format string) error {
-	if d {
-		debug = log.Printf
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var verbose bool
+	var format string
+	fs := flag.NewFlagSet("cpio", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&verbose, "v", false, "Debug prints")
+	fs.StringVar(&format, "H", "newc", "format")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
 	}
 
-	debug("Args %v", args)
-	if len(args) < 1 {
+	rest := fs.Args()
+	if len(rest) < 1 {
 		return errInvalidArgs
 	}
-	op := args[0]
+	op := strings.TrimPrefix(rest[0], "-")
 
 	archiver, err := cpio.Format(format)
 	if err != nil {
 		return fmt.Errorf("format %q not supported: %w", format, err)
 	}
 
+	rootDir := ioEnv.Dir
+	if rootDir == "" {
+		rootDir = "."
+	}
+
 	switch op {
 	case "i":
-		var inums map[uint64]string
-		inums = make(map[uint64]string)
-		rr, err := archiver.NewFileReader(stdin)
+		ra, err := readerAtFromStdin(ioEnv.Stdin)
 		if err != nil {
 			return err
 		}
+		rr := archiver.Reader(ra)
+		inums := make(map[uint64]string)
 		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			rec, err := rr.ReadRecord()
 			if err == io.EOF {
 				break
@@ -78,62 +89,56 @@ func run(args []string, stdin *os.File, stdout io.Writer, d bool, format string)
 			if err != nil {
 				return fmt.Errorf("error reading records: %w", err)
 			}
-			debug("record name %s ino %d\n", rec.Name, rec.Ino)
 
-			// A file with zero size could be a hard link to another file
-			// in the archive. The file with content always comes first.
-			//
-			// But we should ignore files with Ino of 0; that's an illegal value.
-			// The current most common use of this command is with u-root
-			// initramfs cpio files on Linux and Harvey.
-			// (nobody else cares about cpio any more save kernels).
-			// Those always have Ino of zero for reproducible builds.
-			// Hence doing the Ino != 0 test first saves a bit of work.
+			cleanName := filepath.ToSlash(rec.Name)
+			if vol := filepath.VolumeName(cleanName); vol != "" {
+				cleanName = cleanName[len(vol):]
+			}
+			cleanName = strings.TrimPrefix(cleanName, "/")
+			if cleanName == "" {
+				cleanName = "."
+			}
+			rec.Name = cleanName
+
+			targetPath := filepath.Join(rootDir, cleanName)
 			if rec.Ino != 0 {
 				switch rec.Mode & cpio.S_IFMT {
-				// In any Unix past about V1, you can't do os.Link from user mode.
-				// Except via mkdir of course :-).
 				case cpio.S_IFDIR:
 				default:
-					// FileSize of non-zero means it is the first and possibly
-					// only instance of this file.
-					if rec.FileSize != 0 {
-						break
+					if rec.FileSize == 0 {
+						if prev, ok := inums[rec.Ino]; ok {
+							if err := os.Link(prev, targetPath); err != nil {
+								return err
+							}
+							continue
+						}
 					}
-					// If the file is not in []inums it is a true zero-length file,
-					// not a hard link to a file already seen.
-					// (pedantic mode: on Unix all files are hard links;
-					// so what this comment really means is "file with more than one
-					// hard link).
-					ino, ok := inums[rec.Ino]
-					if !ok {
-						break
-					}
-					err := os.Link(ino, rec.Name)
-					debug("Hard linking %s to %s", ino, rec.Name)
-					if err != nil {
-						return err
-					}
-					continue
 				}
-				inums[rec.Ino] = rec.Name
+				inums[rec.Ino] = targetPath
 			}
-			debug("Creating file %s", rec.Name)
-			if err := cpio.CreateFile(rec); err != nil {
-				log.Printf("Creating %q failed: %v", rec.Name, err)
+			if err := cpio.CreateFileInRoot(rec, rootDir, false); err != nil && verbose {
+				fmt.Fprintf(ioEnv.Stderr, "Creating %q failed: %v\n", rec.Name, err)
 			}
 		}
 
 	case "o":
-		rw := archiver.Writer(stdout)
+		rw := archiver.Writer(ioEnv.Stdout)
 		cr := cpio.NewRecorder()
-		scanner := bufio.NewScanner(stdin)
+		scanner := bufio.NewScanner(ioEnv.Stdin)
 		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			name := scanner.Text()
-			rec, err := cr.GetRecord(name)
+			resolved := ioEnv.ResolvePath(name)
+			rec, err := cr.GetRecord(resolved)
 			if err != nil {
 				return fmt.Errorf("getting record of %q failed: %w", name, err)
 			}
+			rec.Name = filepath.ToSlash(name)
 			if err := rw.WriteRecord(rec); err != nil {
 				return fmt.Errorf("writing record %q failed: %w", name, err)
 			}
@@ -147,11 +152,18 @@ func run(args []string, stdin *os.File, stdout io.Writer, d bool, format string)
 		}
 
 	case "t":
-		rr, err := archiver.NewFileReader(stdin)
+		ra, err := readerAtFromStdin(ioEnv.Stdin)
 		if err != nil {
 			return err
 		}
+		rr := archiver.Reader(ra)
 		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			rec, err := rr.ReadRecord()
 			if err == io.EOF {
 				break
@@ -159,7 +171,7 @@ func run(args []string, stdin *os.File, stdout io.Writer, d bool, format string)
 			if err != nil {
 				return fmt.Errorf("error reading records: %w", err)
 			}
-			fmt.Fprintln(stdout, rec)
+			fmt.Fprintln(ioEnv.Stdout, rec)
 		}
 
 	default:
@@ -169,9 +181,20 @@ func run(args []string, stdin *os.File, stdout io.Writer, d bool, format string)
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := run(flag.Args(), os.Stdin, os.Stdout, *d, *format); err != nil {
-		log.Fatalf("cpio: %v", err)
+// Main runs the cpio command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "cpio: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "cpio: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

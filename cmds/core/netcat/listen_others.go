@@ -4,7 +4,7 @@
 
 //go:build (!tinygo || tinygo.enable) && (linux || windows)
 
-package main
+package netcat
 
 import (
 	"fmt"

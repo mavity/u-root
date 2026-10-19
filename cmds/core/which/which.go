@@ -2,71 +2,127 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Which locates a command.
+// Package which locates commands in PATH.
 //
 // Synopsis:
 //
-//	which [-a] [COMMAND]...
+//	which [-a] [-v] [COMMAND]...
 //
 // Options:
 //
 //	-a: print all matching pathnames of each argument
-package main
+//	-v: verbose output
+package which
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"log"
-	"os"
 	"path/filepath"
-	"strings"
+	"runtime"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-var (
-	allPaths = flag.Bool("a", false, "print all matching pathnames of each argument")
-	verbose  = flag.Bool("v", false, "verbose output")
-)
+func findExecutable(p, name string) (string, bool) {
+	target := filepath.Join(p, name)
+	if canExecute(target) {
+		return target, true
+	}
+	if runtime.GOOS == "windows" && filepath.Ext(name) == "" {
+		for _, ext := range []string{".exe", ".cmd", ".bat", ".com"} {
+			withExt := target + ext
+			if canExecute(withExt) {
+				return withExt, true
+			}
+		}
+	}
+	return "", false
+}
 
-func which(writer io.Writer, paths []string, cmds []string, allPaths bool) error {
-	var foundOne bool
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var allPaths, verbose bool
+	fs := flag.NewFlagSet("which", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&allPaths, "a", false, "print all matching pathnames of each argument")
+	fs.BoolVar(&verbose, "v", false, "verbose output")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
+
+	cmds := fs.Args()
+	if len(cmds) == 0 {
+		return errors.New("no command specified")
+	}
+
+	p, ok := ioEnv.LookupEnv("PATH")
+	if !ok || len(p) == 0 {
+		p = "/ubin"
+	}
+	paths := filepath.SplitList(p)
+	if len(paths) == 0 {
+		paths = []string{"/ubin"}
+	}
+
+	var foundAll = true
 	for _, name := range cmds {
-		for _, p := range paths {
-			f := filepath.Join(p, name)
-			if !canExecute(f) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var foundOne bool
+		if ioEnv.IsBuiltin != nil && ioEnv.IsBuiltin(name) {
+			foundOne = true
+			fmt.Fprintln(ioEnv.Stdout, name)
+			if !allPaths {
 				continue
 			}
-
-			foundOne = true
-			if _, err := writer.Write([]byte(f + "\n")); err != nil {
-				return err
+		}
+		for _, dir := range paths {
+			if execPath, ok := findExecutable(dir, name); ok {
+				foundOne = true
+				fmt.Fprintln(ioEnv.Stdout, execPath)
+				if !allPaths {
+					break
+				}
 			}
-			if !allPaths {
-				break
+		}
+		if !foundOne {
+			foundAll = false
+			if verbose {
+				fmt.Fprintf(ioEnv.Stderr, "%s: not found\n", name)
 			}
 		}
 	}
 
-	if !foundOne {
+	if !foundAll {
 		return fmt.Errorf("no suitable executable found")
 	}
 	return nil
 }
 
-func main() {
-	flag.Parse()
-
-	p := os.Getenv("PATH")
-	if len(p) == 0 {
-		// The default bin path of uroot is ubin, fallbacking to it.
-		log.Print("No path variable found! Fallbacking to /ubin")
-		p = "/ubin"
-	}
-
-	if err := which(os.Stdout, strings.Split(p, ":"), flag.Args(), *allPaths); err != nil {
-		if *verbose {
-			log.Printf("Error: %v", err)
+// Main runs the which command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "which: panic: %v\n", r)
+			exitCode = 1
 		}
-		os.Exit(1)
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		if !errors.Is(err, flag.ErrHelp) {
+			// which typically remains silent or logs with -v
+		}
+		return 1
 	}
+	return 0
 }

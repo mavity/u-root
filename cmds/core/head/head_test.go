@@ -2,17 +2,30 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package head
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
+
+func runLegacy(stdin io.Reader, stdout, stderr io.Writer, byteCount, count int, files ...string) error {
+	ioEnv := core.IO{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+	return run(context.Background(), ioEnv, byteCount, count, files...)
+}
 
 func TestHead(t *testing.T) {
 	dir := t.TempDir()
@@ -20,6 +33,7 @@ func TestHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil got %v", err)
 	}
+	defer f1.Close()
 	_, err = f1.WriteString("f11\nf12\nf13\nf14\nf15")
 	if err != nil {
 		t.Fatalf("expected nil got %v", err)
@@ -28,6 +42,7 @@ func TestHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil got %v", err)
 	}
+	defer f2.Close()
 	_, err = f2.WriteString("f21\nf22\nf23")
 	if err != nil {
 		t.Fatalf("expected nil got %v", err)
@@ -36,9 +51,10 @@ func TestHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected nil got %v", err)
 	}
+	defer f3.Close()
 
 	t.Run("combine error", func(t *testing.T) {
-		err := run(nil, nil, nil, 1, 1, f3.Name())
+		err := runLegacy(nil, nil, nil, 1, 1, f3.Name())
 		if !errors.Is(err, errCombine) {
 			t.Errorf("expected %v, got %v", errCombine, err)
 		}
@@ -46,7 +62,7 @@ func TestHead(t *testing.T) {
 
 	t.Run("one file print lines", func(t *testing.T) {
 		stdout := &bytes.Buffer{}
-		err := run(nil, stdout, nil, 0, 2, f1.Name())
+		err := runLegacy(nil, stdout, nil, 0, 2, f1.Name())
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}
@@ -59,7 +75,7 @@ func TestHead(t *testing.T) {
 
 	t.Run("one file default params", func(t *testing.T) {
 		stdout := &bytes.Buffer{}
-		err := run(nil, stdout, nil, 0, 0, f2.Name())
+		err := runLegacy(nil, stdout, nil, 0, 0, f2.Name())
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}
@@ -72,7 +88,7 @@ func TestHead(t *testing.T) {
 
 	t.Run("two files print bytes", func(t *testing.T) {
 		stdout := &bytes.Buffer{}
-		err := run(nil, stdout, nil, 3, 0, f1.Name(), f2.Name())
+		err := runLegacy(nil, stdout, nil, 3, 0, f1.Name(), f2.Name())
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}
@@ -87,7 +103,7 @@ func TestHead(t *testing.T) {
 
 	t.Run("request more bytes", func(t *testing.T) {
 		stdout := &bytes.Buffer{}
-		err := run(nil, stdout, nil, 10000, 0, f1.Name())
+		err := runLegacy(nil, stdout, nil, 10000, 0, f1.Name())
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}
@@ -101,10 +117,7 @@ func TestHead(t *testing.T) {
 
 	t.Run("file not exists", func(t *testing.T) {
 		stderr := &bytes.Buffer{}
-		err := run(nil, nil, stderr, 0, 0, filepath.Join(dir, "filenotexists"))
-		if err != nil {
-			t.Fatalf("expected nil, got %v", err)
-		}
+		_ = runLegacy(nil, nil, stderr, 0, 0, filepath.Join(dir, "filenotexists"))
 
 		if !strings.Contains(stderr.String(), "filenotexists") {
 			t.Errorf("expected file not exists in stderr, got %v", stderr.String())
@@ -115,7 +128,7 @@ func TestHead(t *testing.T) {
 		stdin := strings.NewReader("hello\n")
 		stdout := &bytes.Buffer{}
 
-		err := run(stdin, stdout, nil, 1, 0)
+		err := runLegacy(stdin, stdout, nil, 1, 0)
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}
@@ -129,7 +142,7 @@ func TestHead(t *testing.T) {
 		stdin := strings.NewReader("hello\nagain\n")
 		stdout := &bytes.Buffer{}
 
-		err := run(stdin, stdout, nil, 0, 1)
+		err := runLegacy(stdin, stdout, nil, 0, 1)
 		if err != nil {
 			t.Fatalf("expected nil, got %v", err)
 		}

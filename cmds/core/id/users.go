@@ -2,9 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9
-
-package main
+package id
 
 import (
 	"bufio"
@@ -56,6 +54,7 @@ func NewUsers(file string) (u *Users, e error) {
 	if err != nil {
 		return u, err
 	}
+	defer passwdFile.Close()
 
 	// Read from passwdFile for the users name
 	var passwdInfo []string
@@ -68,6 +67,9 @@ func NewUsers(file string) (u *Users, e error) {
 			continue
 		}
 		passwdInfo = strings.Split(txt, ":")
+		if len(passwdInfo) < 4 {
+			continue
+		}
 		userNum, err := strconv.Atoi(passwdInfo[2])
 		if err != nil {
 			return nil, err
@@ -82,5 +84,5 @@ func NewUsers(file string) (u *Users, e error) {
 		u.userToGID[userNum] = groupNum
 	}
 
-	return
+	return u, nil
 }

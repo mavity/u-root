@@ -2,49 +2,23 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Sort lines.
-//
-// Synopsis:
-//
-//	sort [OPTIONS]... [INPUT]...
-//
-// Description:
-//
-//	Sort copies lines from the input to the output, sorting them in the
-//	process. This does nothing fancy (no multi-threading, compression,
-//	optiminzations, ...); it simply uses Go's sort.Sort function.
-//
-// Options:
-//
-//	-r:      Reverse the result of comparisons
-//	-C:      Check that the single input file is ordered. No warnings.
-//	-u:	     Unique keys. Suppress all lines that have a key that is equal to an already processed one.
-//	-f: 	 Fold lower case to upper case character.
-//	-b: 	 Ignore leading blank characters when comparing lines.
-//	-n:      Compare according to string numerical value.
-//	-o FILE: Specify the name of an output file to be used instead of the standard output.
-package main
+// Package sort sorts lines.
+package sort
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
-	"log"
 	"os"
-	"sort"
+	stdsort "sort"
 	"strconv"
 	"strings"
 	"unicode"
-)
 
-var (
-	reverse      = flag.Bool("r", false, "Reverse the result of comparisons.")
-	ordered      = flag.Bool("C", false, "Check that the single input file is ordered. No warnings.")
-	unique       = flag.Bool("u", false, "Unique keys. Suppress all lines that have a key that is equal to an already processed one.")
-	ignoreCase   = flag.Bool("f", false, "Fold lower case to upper case character.")
-	ignoreBlanks = flag.Bool("b", false, "Ignore leading blank characters when comparing lines.")
-	numeric      = flag.Bool("n", false, "Compare according to string numerical value.")
-	outputFile   = flag.String("o", "", "Specify the name of an output file to be used instead of the standard output.")
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 type ignoreCaseSort []string
@@ -84,18 +58,18 @@ type numericSort []string
 func (a numericSort) Len() int      { return len(a) }
 func (a numericSort) Swap(i, j int) { a[i], a[j] = a[j], a[i] }
 func (a numericSort) Less(i, j int) bool {
-	// consider removing thousands separator and parsing LC_NUMERIC
 	l := strings.ToUpper(strings.TrimLeftFunc(a[i], unicode.IsSpace))
 	r := strings.ToUpper(strings.TrimLeftFunc(a[j], unicode.IsSpace))
 
-	// treat all non-numeric characters as zeros
 	ln, _ := strconv.ParseFloat(l, 64)
 	rn, _ := strconv.ParseFloat(r, 64)
 
 	return ln < rn
 }
 
-var errNotOrdered = errors.New("not ordered")
+// ErrNotOrdered is returned when sort -C finds input is not ordered.
+var ErrNotOrdered = errors.New("not ordered")
+var errNotOrdered = ErrNotOrdered
 
 type params struct {
 	outputFile   string
@@ -125,112 +99,46 @@ func command(stdin io.ReadCloser, stdout, stderr io.Writer, p params, args []str
 	}
 }
 
-func (c *cmd) run() error {
-	// Input files
-	from := []io.ReadCloser{}
-	for _, v := range c.args {
-		f, err := os.Open(v)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		from = append(from, f)
-	}
-
-	if len(c.args) == 0 {
-		from = append(from, c.stdin)
-	}
-
-	// Read unicode string from input
-	fileContents := []string{}
-	for _, f := range from {
-		bytes, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-		s := string(bytes)
-		fileContents = append(fileContents, s)
-		// Add a separator between files if the file is not newline
-		// terminated. Prevents concatenating lines between files.
-		if len(s) > 0 && s[len(s)-1] != '\n' {
-			fileContents = append(fileContents, "\n")
-		}
-	}
-
-	s := strings.Join(fileContents, "")
-	if len(s) > 0 && s[len(s)-1] == '\n' {
-		s = s[:len(s)-1] // remove newline terminator
-	}
-
-	if c.params.ordered {
-		// if ordered is true, set ignoreBlanks to false to be consistent with coreutils
-		// see https://github.com/coreutils/coreutils/blob/d53190ed46a55f599800ebb2d8ddfe38205dbd24/src/sort.c#L4147
-		c.params.ignoreBlanks = false
-		lines := strings.Split(s, "\n")
-		if !sort.IsSorted(c.sortInterface(lines)) {
-			return errNotOrdered
-		}
-
-		if c.params.unique && len(lines) > 1 {
-			for i := 1; i < len(lines); i++ {
-				if c.params.ignoreCase && strings.EqualFold(lines[i], lines[i-1]) {
-					return errNotOrdered
-				} else if lines[i] == lines[i-1] {
-					return errNotOrdered
-				}
-			}
-		}
-
-		return nil
-	}
-
-	if err := c.writeOutput(c.stdout, c.sortAlgorithm(s)); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *cmd) sortInterface(lines []string) sort.Interface {
-	var si sort.Interface
+func sortInterface(p params, lines []string) stdsort.Interface {
+	var si stdsort.Interface
 	switch {
-	case c.params.ignoreBlanks && c.params.ignoreCase:
+	case p.ignoreBlanks && p.ignoreCase:
 		si = ignoreBlanksCaseSort(lines)
-	case c.params.ignoreBlanks:
+	case p.ignoreBlanks:
 		si = ignoreBlanksSort(lines)
-	case c.params.ignoreCase:
+	case p.ignoreCase:
 		si = ignoreCaseSort(lines)
-	case c.params.numeric:
+	case p.numeric:
 		si = numericSort(lines)
 	default:
-		si = sort.StringSlice(lines)
+		si = stdsort.StringSlice(lines)
 	}
-
 	return si
 }
 
-func (c *cmd) sortAlgorithm(s string) string {
+func sortAlgorithm(p params, s string) string {
 	if len(s) == 0 {
-		return "" // edge case mimics coreutils
+		return ""
 	}
 	lines := strings.Split(s, "\n")
-	si := c.sortInterface(lines)
+	si := sortInterface(p, lines)
 
-	if c.params.reverse {
-		sort.Sort(sort.Reverse(si))
+	if p.reverse {
+		stdsort.Sort(stdsort.Reverse(si))
 	} else {
-		sort.Sort(si)
+		stdsort.Sort(si)
 	}
 
-	if c.params.unique && len(lines) > 1 {
+	if p.unique && len(lines) > 1 {
 		j := 1
 		for i := 1; i < len(lines); i++ {
-			if c.params.ignoreCase && c.params.ignoreBlanks {
+			if p.ignoreCase && p.ignoreBlanks {
 				l1 := strings.TrimLeftFunc(lines[i], unicode.IsSpace)
 				l2 := strings.TrimLeftFunc(lines[i-1], unicode.IsSpace)
 				if strings.EqualFold(l1, l2) {
 					continue
 				}
-			} else if c.params.ignoreCase && strings.EqualFold(lines[i], lines[j]) {
+			} else if p.ignoreCase && strings.EqualFold(lines[i], lines[j]) {
 				continue
 			} else if lines[i] == lines[i-1] {
 				continue
@@ -238,17 +146,105 @@ func (c *cmd) sortAlgorithm(s string) string {
 			lines[j] = lines[i]
 			j++
 		}
-
 		lines = lines[:j]
 	}
 
-	return strings.Join(lines, "\n") + "\n" // append newline terminator
+	return strings.Join(lines, "\n") + "\n"
 }
 
-func (c *cmd) writeOutput(w io.Writer, s string) error {
-	to := w
-	if c.params.outputFile != "" {
-		f, err := os.Create(c.params.outputFile)
+func (c *cmd) run() error {
+	ioEnv := core.IO{
+		Stdin:  c.stdin,
+		Stdout: c.stdout,
+		Stderr: c.stderr,
+	}
+	return runSort(context.Background(), ioEnv, c.params, c.args)
+}
+
+func (c *cmd) sortInterface(lines []string) stdsort.Interface {
+	return sortInterface(c.params, lines)
+}
+
+func (c *cmd) sortAlgorithm(s string) string {
+	return sortAlgorithm(c.params, s)
+}
+
+func runSort(ctx context.Context, ioEnv core.IO, p params, args []string) error {
+	from := []io.ReadCloser{}
+	for _, v := range args {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		resolved := ioEnv.ResolvePath(v)
+		f, err := os.Open(resolved)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		from = append(from, f)
+	}
+
+	if len(args) == 0 {
+		if ioEnv.Stdin != nil {
+			if rc, ok := ioEnv.Stdin.(io.ReadCloser); ok {
+				from = append(from, rc)
+			} else {
+				from = append(from, io.NopCloser(ioEnv.Stdin))
+			}
+		}
+	}
+
+	fileContents := []string{}
+	for _, f := range from {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		bytes, err := io.ReadAll(f)
+		if err != nil {
+			return err
+		}
+		s := string(bytes)
+		fileContents = append(fileContents, s)
+		if len(s) > 0 && s[len(s)-1] != '\n' {
+			fileContents = append(fileContents, "\n")
+		}
+	}
+
+	s := strings.Join(fileContents, "")
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	if len(s) > 0 && s[len(s)-1] == '\n' {
+		s = s[:len(s)-1]
+	}
+
+	if p.ordered {
+		p.ignoreBlanks = false
+		lines := strings.Split(s, "\n")
+		if !stdsort.IsSorted(sortInterface(p, lines)) {
+			return ErrNotOrdered
+		}
+
+		if p.unique && len(lines) > 1 {
+			for i := 1; i < len(lines); i++ {
+				if p.ignoreCase && strings.EqualFold(lines[i], lines[i-1]) {
+					return ErrNotOrdered
+				} else if lines[i] == lines[i-1] {
+					return ErrNotOrdered
+				}
+			}
+		}
+
+		return nil
+	}
+
+	outStr := sortAlgorithm(p, s)
+	to := ioEnv.Stdout
+	if p.outputFile != "" {
+		outPath := ioEnv.ResolvePath(p.outputFile)
+		f, err := os.Create(outPath)
 		if err != nil {
 			return err
 		}
@@ -256,20 +252,46 @@ func (c *cmd) writeOutput(w io.Writer, s string) error {
 		to = f
 	}
 
-	_, err := to.Write([]byte(s))
+	_, err := to.Write([]byte(outStr))
 	return err
 }
 
-func main() {
-	flag.Parse()
-	p := params{
-		reverse: *reverse, ordered: *ordered, outputFile: *outputFile, unique: *unique,
-		ignoreCase: *ignoreCase, ignoreBlanks: *ignoreBlanks, numeric: *numeric,
-	}
-	if err := command(os.Stdin, os.Stdout, os.Stderr, p, flag.Args()).run(); err != nil {
-		if err == errNotOrdered {
-			os.Exit(1)
+// Main runs the sort command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "sort: internal panic: %v\n", r)
+			exitCode = 1
 		}
-		log.Fatal(err)
+	}()
+
+	var p params
+	fs := flag.NewFlagSet("sort", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&p.reverse, "r", false, "Reverse the result of comparisons.")
+	fs.BoolVar(&p.ordered, "C", false, "Check that the single input file is ordered. No warnings.")
+	fs.BoolVar(&p.unique, "u", false, "Unique keys. Suppress all lines that have a key that is equal to an already processed one.")
+	fs.BoolVar(&p.ignoreCase, "f", false, "Fold lower case to upper case character.")
+	fs.BoolVar(&p.ignoreBlanks, "b", false, "Ignore leading blank characters when comparing lines.")
+	fs.BoolVar(&p.numeric, "n", false, "Compare according to string numerical value.")
+	fs.StringVar(&p.outputFile, "o", "", "Specify the name of an output file to be used instead of the standard output.")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
+
+	if err := runSort(ctx, ioEnv, p, fs.Args()); err != nil {
+		if errors.Is(err, ErrNotOrdered) {
+			return 1
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "sort: %v\n", err)
+		return 1
+	}
+	return 0
 }

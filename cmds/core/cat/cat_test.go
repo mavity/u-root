@@ -4,7 +4,7 @@
 
 // by Rafael Campos Nunes <rafaelnunes@engineer.com>
 
-package main
+package cat
 
 import (
 	"bytes"
@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"testing"
 	"testing/iotest"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 // setup writes a set of files, putting 1 byte in each file.
@@ -159,5 +161,22 @@ func TestCatDash(t *testing.T) {
 
 	if got != want {
 		t.Errorf("want: %s, got: %s", want, got)
+	}
+}
+
+func TestCatMain(t *testing.T) {
+	tempDir := t.TempDir()
+	f := filepath.Join(tempDir, "test.txt")
+	if err := os.WriteFile(f, []byte("hello from cat\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdout: &out, Stderr: &errOut, Dir: tempDir}
+	code := Main(t.Context(), ioEnv, "test.txt")
+	if code != 0 {
+		t.Fatalf("Main returned %d, err: %s", code, errOut.String())
+	}
+	if out.String() != "hello from cat\n" {
+		t.Fatalf("got %q, want 'hello from cat\\n'", out.String())
 	}
 }

@@ -2,8 +2,6 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9 && !windows
-
 // Kill kills processes.
 //
 // Synopsis:
@@ -19,14 +17,15 @@
 //	                          optional and an OS-dependent value will be
 //	                          used if it is not set. pid is a list of at
 //	                          least one pid.
-package main
+package kill
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
-	"log"
-	"os"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 var (
@@ -91,8 +90,14 @@ func killProcess(w io.Writer, args ...string) error {
 	return nil
 }
 
-func main() {
-	if err := killProcess(os.Stdout, os.Args...); err != nil {
-		log.Fatal(err)
+// Main runs the kill command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	cmdArgs := append([]string{"kill"}, args...)
+	if err := killProcess(ioEnv.Stdout, cmdArgs...); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "%v\n", err)
+		return 1
 	}
+	return 0
 }
+
+

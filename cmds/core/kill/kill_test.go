@@ -2,18 +2,27 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package kill
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
+	"runtime"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func getUnusedPID() string {
-	cmd := exec.Command("true")
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = exec.Command("cmd.exe", "/c", "exit 0")
+	} else {
+		cmd = exec.Command("true")
+	}
 	cmd.Start()
 	pid := cmd.Process.Pid
 	cmd.Wait()
@@ -86,5 +95,17 @@ func TestKillProcess(t *testing.T) {
 func TestSignalList(t *testing.T) {
 	if len(signames)*2 != len(signums) {
 		t.Error("len(signames) * 2 != len(signums)")
+	}
+}
+
+func TestMain(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+	code := Main(context.Background(), ioEnv, "-l")
+	if code != 0 {
+		t.Fatalf("Main(-l) returned %d, stderr: %s", code, stderr.String())
+	}
+	if stdout.String() != fmt.Sprintf("%s\n", siglist()) {
+		t.Fatalf("Main(-l) unexpected output: %q", stdout.String())
 	}
 }

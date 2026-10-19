@@ -2,148 +2,168 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// comm compares two files.
-//
-// Synopsis:
-//
-//	comm [-123h] FILE1 FILE2
-//
-// Description:
-//
-//	Comm reads file1 and file2, which are in lexicographical order, and
-//	produces a three column output: lines only in file1; lines only in
-//	file2; and lines in both files. The file name – means the standard
-//	input.
-//
-// Options:
-//
-//	-1: suppress printing of column 1
-//	-2: suppress printing of column 2
-//	-3: suppress printing of column 3
-//	-h: print this help message and exit
-package main
+// Package comm compares two files.
+package comm
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"strings"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-var (
-	s1   = flag.Bool("1", false, "suppress printing of column 1")
-	s2   = flag.Bool("2", false, "suppress printing of column 2")
-	s3   = flag.Bool("3", false, "suppress printing of column 3")
-	help = flag.Bool("h", false, "print this help message and exit")
+// ErrUsage is the error for incorrect usage.
+var ErrUsage = errors.New("comm: comm [-123h] file1 file2")
 
-	// ErrUsage is the error for incorrect usage.
-	ErrUsage = errors.New("comm: comm [-123h] file1 file2")
-)
-
-func reader(r io.Reader, c chan string) {
-	b := bufio.NewReader(r)
-	for {
-		s, err := b.ReadString('\n')
-		c <- strings.TrimRight(s, "\r\n")
-		if err != nil {
-			break
+func readLines(ctx context.Context, r io.Reader) ([]string, error) {
+	scanner := bufio.NewScanner(r)
+	var lines []string
+	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
 		}
+		lines = append(lines, strings.TrimRight(scanner.Text(), "\r\n"))
 	}
-	close(c)
+	return lines, scanner.Err()
 }
 
-type out struct {
-	s1, s2, s3 string
-}
-
-func outer(c1, c2 chan string, c chan out) {
-	s1, ok1 := <-c1
-	s2, ok2 := <-c2
-	for {
-		if ok1 && ok2 {
-			switch {
-			case s1 < s2:
-				c <- out{s1, "", ""}
-				s1, ok1 = <-c1
-			case s1 > s2:
-				c <- out{"", s2, ""}
-				s2, ok2 = <-c2
-			default:
-				c <- out{"", "", s2}
-				s1, ok1 = <-c1
-				s2, ok2 = <-c2
-			}
-		} else if ok1 {
-			c <- out{s1, "", ""}
-			s1, ok1 = <-c1
-		} else if ok2 {
-			c <- out{"", s2, ""}
-			s2, ok2 = <-c2
-		} else {
-			break
-		}
+func openStream(ioEnv core.IO, arg string) (io.Reader, io.Closer, error) {
+	if arg == "-" {
+		return ioEnv.Stdin, nil, nil
 	}
-	close(c)
+	resolved := ioEnv.ResolvePath(arg)
+	f, err := os.Open(resolved)
+	if err != nil {
+		return nil, nil, err
+	}
+	return f, f, nil
 }
 
-func comm(w io.Writer, s1, s2, s3, help bool, args ...string) error {
+func runComm(ctx context.Context, ioEnv core.IO, s1, s2, s3, help bool, args ...string) error {
 	if len(args) != 2 || help {
 		return ErrUsage
 	}
 
-	c1 := make(chan string, 100)
-	c2 := make(chan string, 100)
-	c := make(chan out, 100)
-
-	f1, err := os.Open(args[0])
+	r1, cl1, err := openStream(ioEnv, args[0])
 	if err != nil {
-		return fmt.Errorf("can't open %s: %w", args[0], err)
+		return err
+	}
+	if cl1 != nil {
+		defer cl1.Close()
+	}
+	r2, cl2, err := openStream(ioEnv, args[1])
+	if err != nil {
+		return err
+	}
+	if cl2 != nil {
+		defer cl2.Close()
 	}
 
-	f2, err := os.Open(args[1])
+	lines1, err := readLines(ctx, r1)
 	if err != nil {
-		return fmt.Errorf("can't open %s: %w", args[1], err)
+		return err
 	}
-	go reader(f1, c1)
-	go reader(f2, c2)
-	go outer(c1, c2, c)
+	lines2, err := readLines(ctx, r2)
+	if err != nil {
+		return err
+	}
 
-	for {
-		out, ok := <-c
-		if !ok {
-			break
+	i, j := 0, 0
+	for i < len(lines1) || j < len(lines2) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		var col1, col2, col3 string
+		if i < len(lines1) && j < len(lines2) {
+			switch {
+			case lines1[i] < lines2[j]:
+				col1 = lines1[i]
+				i++
+			case lines1[i] > lines2[j]:
+				col2 = lines2[j]
+				j++
+			default:
+				col3 = lines1[i]
+				i++
+				j++
+			}
+		} else if i < len(lines1) {
+			col1 = lines1[i]
+			i++
+		} else {
+			col2 = lines2[j]
+			j++
 		}
 
 		line := ""
 		if !s1 {
-			line += out.s1
+			line += col1
 		}
 		line += "\t"
 		if !s2 {
-			line += out.s2
+			line += col2
 		}
 		line += "\t"
 		if !s3 {
-			line += out.s3
+			line += col3
 		}
 		if line != "\t\t" {
-			fmt.Fprintln(w, strings.TrimRight(line, "\t")) // the unix comm utility does this
+			fmt.Fprintln(ioEnv.Stdout, strings.TrimRight(line, "\t"))
 		}
 	}
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := comm(os.Stdout, *s1, *s2, *s3, *help, flag.Args()...); err != nil {
-		if err == ErrUsage {
-			log.Println(err.Error())
-			flag.Usage()
-		}
-		log.Fatal(err)
+// comm provides backward compatibility for unit tests.
+func comm(w io.Writer, s1, s2, s3, help bool, args ...string) error {
+	ioEnv := core.IO{
+		Stdout: w,
 	}
+	return runComm(context.Background(), ioEnv, s1, s2, s3, help, args...)
+}
+
+// Main runs the comm command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "comm: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var s1, s2, s3, help bool
+	fs := flag.NewFlagSet("comm", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&s1, "1", false, "suppress printing of column 1")
+	fs.BoolVar(&s2, "2", false, "suppress printing of column 2")
+	fs.BoolVar(&s3, "3", false, "suppress printing of column 3")
+	fs.BoolVar(&help, "h", false, "print this help message and exit")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	if err := runComm(ctx, ioEnv, s1, s2, s3, help, fs.Args()...); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "comm: %v\n", err)
+		return 1
+	}
+	return 0
 }

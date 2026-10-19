@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// false returns 1.
+// Package falsecmd returns 1.
 //
 // Synopsis:
 //
@@ -11,10 +11,15 @@
 // Description:
 //
 //	Command line arguments are ignored.
-package main
+package falsecmd
 
-import "os"
+import (
+	"context"
 
-func main() {
-	os.Exit(1)
+	"github.com/u-root/u-root/pkg/core"
+)
+
+// Main runs the false command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
+	return 1
 }

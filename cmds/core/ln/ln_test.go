@@ -4,12 +4,17 @@
 
 // created by Manoel Vilela <manoel_vilela@engineer.com>
 
-package main
+package ln
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type create struct {
@@ -31,12 +36,9 @@ type test struct {
 }
 
 // loadTests loads the main table driven tests
-// for ln command tests
 func loadTests() []test {
 	return []test{
 		{
-			// covers usage:
-			// ln [OPTIONS]... [-T] TARGET LINK_NAME   (1st form) (posix)
 			config{},
 			[]string{"a", "b"},
 			[]result{{name: "b", linksTo: "a"}},
@@ -51,8 +53,6 @@ func loadTests() []test {
 			"ln -s a b",
 		},
 		{
-			// covers usage:
-			// ln [OPTIONS]... TARGET   (2nd form) (gnu)
 			config{symlink: true},
 			[]string{"bin/cp"},
 			[]result{
@@ -65,8 +65,6 @@ func loadTests() []test {
 			"ln -s bin/cp",
 		},
 		{
-			// covers usage:
-			// ln [OPTIONS]... TARGET... DIRECTORY  (3rd form) (posix)
 			config{symlink: true},
 			[]string{"bin/cp", "bin/ls", "bin/ln", "."},
 			[]result{
@@ -83,8 +81,6 @@ func loadTests() []test {
 			"ln -s bin/cp bin/ls bin/ln .",
 		},
 		{
-			// covers usage:
-			// ln [OPTIONS]... -t DIRECTORY TARGET...  (4th form) (gnu)
 			config{symlink: true, dirtgt: "."},
 			[]string{"bin/cp", "bin/ls", "bin/ln"},
 			[]result{
@@ -101,8 +97,6 @@ func loadTests() []test {
 			"ln -s bin/cp bin/ls bin/ln -t .",
 		},
 		{
-			// covers usage:
-			// ln [OPTIONS]... -t DIRECTORY TARGET...  (4th form) (gnu)
 			config{symlink: true, dirtgt: "folder", relative: true},
 			[]string{"cp", "ls", "ln"},
 			[]result{
@@ -119,7 +113,6 @@ func loadTests() []test {
 			"ln -s -v -r -t folder cp ls ln",
 		},
 		{
-			// -i -f mutually exclusive (f overwrite evers)
 			config{force: true, prompt: true},
 			[]string{"a", "overwrite"},
 			[]result{
@@ -134,123 +127,114 @@ func loadTests() []test {
 	}
 }
 
-// testHardLink test if hardlink creation was successful
-// 'target' and 'linkName' must exists
-// linkName -> target
-func testHardLink(linkName, target string, t *testing.T) {
-	linkStat, err := os.Stat(linkName)
+func testHardLink(dir, linkName, target string, t *testing.T) {
+	lp := filepath.Join(dir, linkName)
+	tp := filepath.Join(dir, target)
+	linkStat, err := os.Stat(lp)
 	if err != nil {
-		t.Errorf("stat %q failed: %v", linkName, err)
+		t.Errorf("stat %q failed: %v", lp, err)
+		return
 	}
-	targetStat, err := os.Stat(target)
+	targetStat, err := os.Stat(tp)
 	if err != nil {
-		t.Errorf("stat %q failed: %v", target, err)
+		t.Errorf("stat %q failed: %v", tp, err)
+		return
 	}
 	if !os.SameFile(linkStat, targetStat) {
 		t.Errorf("link %q, %q did not create hard link", linkName, target)
 	}
 }
 
-// testSymllink test if symlink creation was successful
-// 'target' and 'linkName' must exists
-// linkName -> target
-func testSymlink(linkName, linksTo string, t *testing.T) {
-	target := linksTo
-	if !filepath.IsAbs(target) {
-		target = filepath.Base(target)
+func testSymlink(dir, linkName, linksTo string, t *testing.T) {
+	lp := filepath.Join(dir, linkName)
+	linkStat, err := os.Stat(lp)
+	if err != nil {
+		t.Errorf("stat %q failed: %v", lp, err)
+		return
 	}
 
-	linkStat, err := os.Stat(linkName)
+	tp := filepath.Join(filepath.Dir(lp), linksTo)
+	targetStat, err := os.Stat(tp)
 	if err != nil {
-		t.Errorf("stat %q failed: %v", linkName, err)
-	}
-	targetStat, err := os.Stat(target)
-	if err != nil {
-		t.Errorf("stat %q failed: %v", target, err)
+		t.Errorf("stat target %q failed: %v", tp, err)
+		return
 	}
 	if !os.SameFile(linkStat, targetStat) {
-		t.Errorf("symlink %q, %q did not create symlink", linkName, target)
-	}
-	targetStat, err = os.Stat(target)
-	if err != nil {
-		t.Errorf("lstat %q failed: %v", target, err)
+		t.Errorf("symlink %q, %q did not resolve to same file", linkName, tp)
 	}
 
-	if targetStat.Mode()&os.ModeSymlink == os.ModeSymlink {
-		t.Errorf("symlink %q, %q did not create symlink", linkName, target)
+	s, err := os.Readlink(lp)
+	if err != nil {
+		t.Errorf("readlink %q failed: %v", lp, err)
+		return
 	}
 
-	targetStat, err = os.Stat(target)
-	if err != nil {
-		t.Errorf("stat %q failed: %v", target, err)
+	// Normalize both slash styles for comparison
+	expectedNorm := filepath.Clean(linksTo)
+	actualNorm := filepath.Clean(s)
+	if strings.ReplaceAll(actualNorm, "\\", "/") != strings.ReplaceAll(expectedNorm, "\\", "/") {
+		t.Errorf("after symlink clean %q != %q (raw readlink=%q)", actualNorm, expectedNorm, s)
 	}
-	if targetStat.Mode()&os.ModeSymlink != 0 {
-		t.Errorf("stat %q did not follow symlink", target)
-	}
-	s, err := os.Readlink(linkName)
-	if err != nil {
-		t.Errorf("readlink %q failed: %v", target, err)
-	}
-	if s != linksTo {
-		t.Errorf("after symlink %q != %q", s, target)
-	}
-	file, err := os.Open(target)
-	if err != nil {
-		t.Errorf("open %q failed: %v", target, err)
-	}
-	file.Close()
 }
 
-// TestLn make a general tests based on
-// tabDriven tests (see loadTests())
 func TestLn(t *testing.T) {
 	tabDriven := loadTests()
-	testDir := t.TempDir()
-
-	// executing ln on isolated testDir
-	if err := os.Chdir(testDir); err != nil {
-		t.Fatalf("Changing directory for %q fails: %v", testDir, err)
-	}
-	defer os.Chdir("..") // after defer to go back to the original root
 
 	for caseNum, testCase := range tabDriven {
 		d := t.TempDir()
-		if err := os.Chdir(d); err != nil {
-			t.Fatalf("Changing directory for %q fails: %v", d, err)
-		}
 
 		for _, f := range testCase.files {
-			t.Logf("Creating: %v (dir: %v)", f.name, f.dir)
-			p := filepath.Join(f.name)
+			p := filepath.Join(d, f.name)
 			if f.dir {
-				if err := os.Mkdir(p, 0o750); err != nil && err == os.ErrExist {
-					t.Skipf("Creation of dir %q fails: %v", p, err)
+				if err := os.MkdirAll(p, 0o750); err != nil && err != os.ErrExist {
+					t.Fatalf("Creation of dir %q fails: %v", p, err)
 				}
 			} else {
+				if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+					t.Fatal(err)
+				}
 				if err := os.WriteFile(p, []byte{'.'}, 0o640); err != nil {
 					t.Fatal(err)
 				}
 			}
-
 		}
 
-		if err := testCase.conf.ln(testCase.args); err != nil {
+		var cmdArgs []string
+		if testCase.conf.symlink {
+			cmdArgs = append(cmdArgs, "-s")
+		}
+		if testCase.conf.force {
+			cmdArgs = append(cmdArgs, "-f")
+		}
+		if testCase.conf.prompt {
+			cmdArgs = append(cmdArgs, "-i")
+		}
+		if testCase.conf.relative {
+			cmdArgs = append(cmdArgs, "-r")
+		}
+		if testCase.conf.dirtgt != "" {
+			cmdArgs = append(cmdArgs, "-t", testCase.conf.dirtgt)
+		}
+		cmdArgs = append(cmdArgs, testCase.args...)
+
+		ioEnv := core.IO{
+			Stdin:  strings.NewReader("y\n"),
+			Stdout: io.Discard,
+			Stderr: io.Discard,
+			Dir:    d,
+		}
+
+		if err := run(context.Background(), ioEnv, cmdArgs...); err != nil {
 			t.Errorf("Fails: test [%d]. %v", caseNum+1, err)
 			continue
 		}
 
-		t.Logf("Testing cmdline: %q", testCase.cmdline)
 		for _, expected := range testCase.results {
 			if expected.symlink {
-				t.Logf("%q -> %q (symlink)", expected.name, expected.linksTo)
-				testSymlink(expected.name, expected.linksTo, t)
+				testSymlink(d, expected.name, expected.linksTo, t)
 			} else {
-				t.Logf("%q -> %q (hardlink)", expected.name, expected.linksTo)
-				testHardLink(expected.name, expected.linksTo, t)
+				testHardLink(d, expected.name, expected.linksTo, t)
 			}
 		}
-
-		// backing to testDir folder
-		os.Chdir("..")
 	}
 }

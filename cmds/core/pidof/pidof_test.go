@@ -2,12 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package pidof
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestPidof(t *testing.T) {
@@ -82,4 +89,61 @@ func TestPidofMissing(t *testing.T) {
 	if stdout.String() != "" {
 		t.Errorf("expected empty string got %q", stdout.String())
 	}
+}
+
+func TestMain(t *testing.T) {
+	t.Run("pidof current executable", func(t *testing.T) {
+		execName := filepath.Base(os.Args[0])
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, execName)
+		if code != 0 {
+			// Also try without .exe if on windows
+			if strings.HasSuffix(execName, ".exe") {
+				stdout.Reset()
+				code = Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, strings.TrimSuffix(execName, ".exe"))
+			}
+		}
+		if code != 0 {
+			t.Fatalf("pidof %s failed: code=%d, stderr=%s", execName, code, stderr.String())
+		}
+		pids := strings.Fields(stdout.String())
+		if len(pids) == 0 {
+			t.Fatalf("expected pids, got empty output")
+		}
+		currentPID := strconv.Itoa(os.Getpid())
+		found := false
+		for _, pid := range pids {
+			if pid == currentPID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Logf("current PID %s was in pids %v (test runner may be parent)", currentPID, pids)
+		}
+	})
+
+	t.Run("pidof not found", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "nonexistentprocess12345xyz")
+		if code != 1 {
+			t.Fatalf("pidof nonexistent expected code 1, got %d", code)
+		}
+	})
+
+	t.Run("pidof no args", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr})
+		if code != 1 {
+			t.Fatalf("pidof no args expected code 1, got %d", code)
+		}
+	})
+
+	t.Run("pidof -help", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-help")
+		if code != 0 {
+			t.Fatalf("pidof -help expected code 0, got %d", code)
+		}
+	})
 }

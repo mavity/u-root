@@ -4,14 +4,14 @@
 
 //go:build (!tinygo || tinygo.enable) && !plan9 && !goshsmall
 
-package main
+package gosh
 
 import (
-	"io/fs"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode"
 
@@ -159,18 +159,26 @@ func filepathCompleter(input string) []string {
 
 func commandCompleter(input string) []string {
 	var candidates []string
+	seen := make(map[string]bool)
 
-	for path := range strings.SplitSeq(os.Getenv("PATH"), ":") {
-		if err := filepath.WalkDir(path, func(path string, d fs.DirEntry, err error) error {
-			if d != nil && !d.IsDir() && strings.HasPrefix(d.Name(), input) {
-				// Is executable?
-				if fi, err := d.Info(); err == nil && fi.Mode().Perm()&0o111 != 0 {
-					candidates = append(candidates, d.Name())
+	for _, p := range filepath.SplitList(os.Getenv("PATH")) {
+		entries, err := os.ReadDir(p)
+		if err != nil {
+			continue
+		}
+		for _, d := range entries {
+			if !d.IsDir() && strings.HasPrefix(d.Name(), input) {
+				if fi, err := d.Info(); err == nil {
+					name := d.Name()
+					ext := strings.ToLower(filepath.Ext(name))
+					if fi.Mode().Perm()&0o111 != 0 || runtime.GOOS == "windows" || ext == ".exe" || ext == ".bat" || ext == ".cmd" {
+						if !seen[name] {
+							candidates = append(candidates, name)
+							seen[name] = true
+						}
+					}
 				}
 			}
-			return nil
-		}); err != nil {
-			continue
 		}
 	}
 

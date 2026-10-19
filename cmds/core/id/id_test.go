@@ -1,20 +1,19 @@
-// Copyright 2017-2018 the u-root Authors. All rights reserved
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-//go:build !plan9
-
-package main
+package id
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestBadFiles(t *testing.T) {
@@ -96,6 +95,8 @@ func TestGoodFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		_ = passwd.Close()
+
 		group, err := os.CreateTemp(d, "group")
 		if err != nil {
 			t.Fatal(err)
@@ -104,6 +105,7 @@ func TestGoodFiles(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		_ = group.Close()
 
 		var stdout bytes.Buffer
 		if err := run(&stdout, test.userName, &test.flags, passwd.Name(), group.Name()); err != nil {
@@ -391,3 +393,71 @@ func TestFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestMain(t *testing.T) {
+	t.Run("default id", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr})
+		if code != 0 {
+			t.Fatalf("expected code 0, got %d, stderr=%s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "uid=") || !strings.Contains(out, "gid=") {
+			t.Errorf("output missing uid/gid: %s", out)
+		}
+	})
+
+	t.Run("flags -u and -un", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-u")
+		if code != 0 {
+			t.Fatalf("id -u failed: %d, stderr=%s", code, stderr.String())
+		}
+		uid := strings.TrimSpace(stdout.String())
+		if _, err := strconv.Atoi(uid); err != nil {
+			t.Errorf("id -u did not return integer: %q", uid)
+		}
+
+		stdout.Reset()
+		code = Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-u", "-n")
+		if code != 0 {
+			t.Fatalf("id -un failed: %d, stderr=%s", code, stderr.String())
+		}
+		name := strings.TrimSpace(stdout.String())
+		if name == "" {
+			t.Errorf("id -un returned empty name")
+		}
+	})
+
+	t.Run("flag -g", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-g")
+		if code != 0 {
+			t.Fatalf("id -g failed: %d, stderr=%s", code, stderr.String())
+		}
+		gid := strings.TrimSpace(stdout.String())
+		if _, err := strconv.Atoi(gid); err != nil {
+			t.Errorf("id -g did not return integer: %q", gid)
+		}
+	})
+
+	t.Run("flag -G", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-G")
+		if code != 0 {
+			t.Fatalf("id -G failed: %d, stderr=%s", code, stderr.String())
+		}
+		if strings.TrimSpace(stdout.String()) == "" {
+			t.Errorf("id -G returned empty")
+		}
+	})
+
+	t.Run("flag -help", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-help")
+		if code != 0 {
+			t.Fatalf("id -help expected 0, got %d", code)
+		}
+	})
+}
+

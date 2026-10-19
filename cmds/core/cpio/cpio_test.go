@@ -2,16 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package cpiocmd
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type dirEnt struct {
@@ -31,7 +34,7 @@ func prepareTestDir(t *testing.T, tempDir string) ([]dirEnt, *os.File) {
 		{Name: "file2", Type: "file", Content: ""},
 		{Name: "directory1", Type: "dir"},
 	}
-	if runtime.GOOS != "plan9" {
+	if runtime.GOOS != "plan9" && runtime.GOOS != "windows" {
 		targets = append(targets, []dirEnt{
 			{Name: "hardlinked", Type: "hardlink", Target: "file1", Content: "Hello World"},
 			{Name: "hardlinkedtofile2", Type: "hardlink", Target: "file2"},
@@ -84,7 +87,7 @@ func prepareTestDir(t *testing.T, tempDir string) ([]dirEnt, *os.File) {
 	}
 
 	for _, ent := range targets {
-		name := filepath.Join(tempDir, ent.Name)
+		name := ent.Name
 		if _, err := fmt.Fprintln(inputFile, name); err != nil {
 			t.Fatalf("failed to write file path %v to input file: %v", ent.Name, err)
 		}
@@ -97,19 +100,27 @@ func prepareTestDir(t *testing.T, tempDir string) ([]dirEnt, *os.File) {
 func TestCpioList(t *testing.T) {
 	tmpDir := t.TempDir()
 	targets, inputFile := prepareTestDir(t, tmpDir)
+	defer inputFile.Close()
 
 	archive, err := os.CreateTemp(tmpDir, "archive.cpio")
 	if err != nil {
 		t.Fatalf("failed to create temporary archive file: %v", err)
 	}
+	defer archive.Close()
 
-	err = run([]string{"o"}, inputFile, archive, false, "newc")
+	ioEnv := core.IO{Dir: tmpDir, Stdin: inputFile, Stdout: archive}
+	err = run(context.Background(), ioEnv, "o")
 	if err != nil {
 		t.Fatalf("failed to build archive from filepaths: %v", err)
 	}
 
+	if _, err := archive.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+
 	stdout := &bytes.Buffer{}
-	err = run([]string{"t"}, archive, stdout, false, "newc")
+	ioEnv = core.IO{Dir: tmpDir, Stdin: archive, Stdout: stdout}
+	err = run(context.Background(), ioEnv, "t")
 	if err != nil {
 		t.Fatalf("failed to list archive: %v", err)
 	}
@@ -123,51 +134,29 @@ func TestCpioList(t *testing.T) {
 }
 
 func TestCpio(t *testing.T) {
-	debug = t.Logf
-	// Create a temporary directory
 	tempDir := t.TempDir()
 	targets, inputFile := prepareTestDir(t, tempDir)
+	defer inputFile.Close()
 
 	archive := &bytes.Buffer{}
-	err := run([]string{"o"}, inputFile, archive, true, "newc")
+	ioEnv := core.IO{Dir: tempDir, Stdin: inputFile, Stdout: archive}
+	err := run(context.Background(), ioEnv, "o")
 	if err != nil {
 		t.Fatalf("failed to build archive from filepaths: %v", err)
-	}
-
-	// Cpio can't read from a non-seekable input (e.g. a pipe) in input mode.
-	// Write the archive to a file instead.
-	archiveFile, err := os.CreateTemp(tempDir, "archive.cpio")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := archiveFile.Write(archive.Bytes()); err != nil {
-		t.Fatal(err)
 	}
 
 	// Extract to a new directory
 	tempExtractDir := t.TempDir()
 
 	out := &bytes.Buffer{}
-	// Change directory back afterwards to not interfere with the subsequent tests
-	wd, err := os.Getwd()
+	extractEnv := core.IO{Dir: tempExtractDir, Stdin: bytes.NewReader(archive.Bytes()), Stdout: out, Stderr: out}
+	err = run(context.Background(), extractEnv, "-v", "i")
 	if err != nil {
-		t.Fatalf("Could not get current working directory: %v", err)
-	}
-	defer os.Chdir(wd)
-
-	err = os.Chdir(tempExtractDir)
-	if err != nil {
-		t.Fatalf("Change to extraction directory %v failed: %#v", tempExtractDir, err)
-	}
-
-	err = run([]string{"i"}, archiveFile, out, true, "newc")
-	if err != nil {
-		t.Fatalf("Extraction failed:\n%#v\n%v\n", out, err)
+		t.Fatalf("Extraction failed:\n%#v\n%v\n", out.String(), err)
 	}
 
 	for _, ent := range targets {
-		name := filepath.Join(tempExtractDir, tempDir, ent.Name)
+		name := filepath.Join(tempExtractDir, ent.Name)
 
 		newFileInfo, err := os.Stat(name)
 		if err != nil {
@@ -189,27 +178,16 @@ func TestCpio(t *testing.T) {
 }
 
 func TestDirectoryHardLink(t *testing.T) {
-	// Open an archive containing two directories with the same inode (0).
-	// We're trying to test if having the same inode will trigger a hard link.
 	archiveFile, err := os.Open("testdata/dir-hard-link.cpio")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer archiveFile.Close()
 
-	// Change directory back afterwards to not interfere with the subsequent tests
-	wd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Could not get current working directory: %v", err)
-	}
-	defer os.Chdir(wd)
 	tempExtractDir := t.TempDir()
-	err = os.Chdir(tempExtractDir)
-	if err != nil {
-		t.Fatalf("Change to dir %v failed: %v", tempExtractDir, err)
-	}
-
 	want := &bytes.Buffer{}
-	err = run([]string{"i"}, archiveFile, want, true, "newc")
+	ioEnv := core.IO{Dir: tempExtractDir, Stdin: archiveFile, Stdout: want}
+	err = run(context.Background(), ioEnv, "i")
 	if err != nil {
 		t.Fatalf("Extraction failed:\n%v\n%v\n", want, err)
 	}

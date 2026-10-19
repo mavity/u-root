@@ -23,24 +23,21 @@
 //	-v: verbose, print each filename (optional)
 //	-f: tar filename (required)
 //	-t: list the contents of an archive
-//
-// TODO: The arguments deviates slightly from gnu tar.
-package main
+package tarcmd
 
 import (
+	"archive/tar"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"io"
 	"os"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/tarutil"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
-
-type cmd struct {
-	p    params
-	args []string
-}
 
 type params struct {
 	file        string
@@ -60,111 +57,147 @@ var (
 	errExtractArgsLen       = fmt.Errorf("args length should be 1")
 )
 
-func command(p params, args []string) (*cmd, error) {
+func validate(p params, args []string) error {
 	if p.create && p.extract {
-		return nil, errCreateAndExtract
+		return errCreateAndExtract
 	}
 	if p.create && p.list {
-		return nil, errCreateAndList
+		return errCreateAndList
 	}
 	if p.extract && p.list {
-		return nil, errExtractAndList
+		return errExtractAndList
 	}
 	if p.extract && len(args) != 1 {
-		return nil, errExtractArgsLen
+		return errExtractArgsLen
 	}
 	if !p.extract && !p.create && !p.list {
-		return nil, errMissingMandatoryFlag
+		return errMissingMandatoryFlag
 	}
 	if p.file == "" {
-		return nil, errEmptyFile
+		return errEmptyFile
 	}
-
-	return &cmd{
-		p:    p,
-		args: args,
-	}, nil
+	return nil
 }
 
-func (c *cmd) run() error {
-	opts := &tarutil.Opts{
-		NoRecursion: c.p.noRecursion,
-	}
-	if c.p.verbose {
-		opts.Filters = []tarutil.Filter{tarutil.VerboseFilter}
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var p params
+	f := flag.NewFlagSet("tar", flag.ContinueOnError)
+	f.SetOutput(ioEnv.Stderr)
+
+	f.BoolVar(&p.create, "create", false, "create a new tar archive from the given directory")
+	f.BoolVar(&p.create, "c", false, "create a new tar archive from the given directory (shorthand)")
+
+	f.BoolVar(&p.extract, "extract", false, "extract a tar archive from the given directory")
+	f.BoolVar(&p.extract, "x", false, "extract a tar archive from the given directory (shorthand)")
+
+	f.StringVar(&p.file, "file", "", "tar file")
+	f.StringVar(&p.file, "f", "", "tar file (shorthand)")
+
+	f.BoolVar(&p.list, "list", false, "list the contents of an archive")
+	f.BoolVar(&p.list, "t", false, "list the contents of an archive (shorthand)")
+
+	f.BoolVar(&p.noRecursion, "no-recursion", false, "do not automatically recurse into directories")
+
+	f.BoolVar(&p.verbose, "verbose", false, "print each filename")
+	f.BoolVar(&p.verbose, "v", false, "print each filename (shorthand)")
+
+	f.Usage = func() {
+		fmt.Fprintf(f.Output(), "Usage of tar:\n")
+		f.PrintDefaults()
 	}
 
+	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
+
+	rest := f.Args()
+	if err := validate(p, rest); err != nil {
+		f.Usage()
+		return err
+	}
+
+	opts := &tarutil.Opts{
+		NoRecursion:     p.noRecursion,
+		ChangeDirectory: ioEnv.Dir,
+	}
+	if p.verbose {
+		opts.Filters = []tarutil.Filter{func(hdr *tar.Header) bool {
+			fmt.Fprintln(ioEnv.Stdout, hdr.Name)
+			return true
+		}}
+	}
+
+	filePath := ioEnv.ResolvePath(p.file)
+
 	switch {
-	case c.p.create:
-		f, err := os.Create(c.p.file)
+	case p.create:
+		tarFile, err := os.Create(filePath)
 		if err != nil {
 			return err
 		}
-		if err := tarutil.CreateTar(f, c.args, opts); err != nil {
-			f.Close()
+		if err := tarutil.CreateTar(tarFile, rest, opts); err != nil {
+			tarFile.Close()
 			return err
 		}
-		if err := f.Close(); err != nil {
+		if err := tarFile.Close(); err != nil {
 			return err
 		}
-	case c.p.extract:
-		f, err := os.Open(c.p.file)
+
+	case p.extract:
+		tarFile, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		if err := tarutil.ExtractDir(f, c.args[0], opts); err != nil {
+		defer tarFile.Close()
+
+		extractDir := rest[0]
+		if err := tarutil.ExtractDir(tarFile, extractDir, opts); err != nil {
 			return err
 		}
-	case c.p.list:
-		f, err := os.Open(c.p.file)
+
+	case p.list:
+		tarFile, err := os.Open(filePath)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		if err := tarutil.ListArchive(f); err != nil {
-			return err
+		defer tarFile.Close()
+
+		tr := tar.NewReader(tarFile)
+		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(ioEnv.Stdout, hdr.Name)
 		}
 	}
 
 	return nil
 }
 
-func main() {
-	var (
-		create      bool
-		extract     bool
-		file        string
-		list        bool
-		noRecursion bool
-		verbose     bool
-	)
-	f := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+// Main runs the tar command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "tar: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
 
-	f.BoolVar(&create, "create", false, "create a new tar archive from the given directory")
-	f.BoolVar(&create, "c", false, "create a new tar archive from the given directory (shorthand)")
-
-	f.BoolVar(&extract, "extract", false, "extract a tar archive from the given directory")
-	f.BoolVar(&extract, "x", false, "extract a tar archive from the given directory (shorthand)")
-
-	f.StringVar(&file, "file", "", "tar file")
-	f.StringVar(&file, "f", "", "tar file (shorthand)")
-
-	f.BoolVar(&list, "list", false, "list the contents of an archive")
-	f.BoolVar(&list, "t", false, "list the contents of an archive (shorthand)")
-
-	f.BoolVar(&noRecursion, "no-recursion", false, "do not automatically recurse into directories")
-
-	f.BoolVar(&verbose, "verbose", false, "print each filename")
-	f.BoolVar(&verbose, "v", false, "print each filename (shorthand)")
-
-	f.Parse(unixflag.OSArgsToGoArgs())
-	cmd, err := command(params{file: file, create: create, extract: extract, list: list, noRecursion: noRecursion, verbose: verbose}, f.Args())
-	if err != nil {
-		f.Usage()
-		log.Fatal(err)
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "tar: %v\n", err)
+		}
+		return 1
 	}
-	if err := cmd.run(); err != nil {
-		log.Fatal(err)
-	}
+	return 0
 }

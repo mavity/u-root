@@ -2,22 +2,24 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package xargs
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestTooSmall(t *testing.T) {
 	p := params{maxArgs: 0}
-	c := command(nil, nil, nil, p)
-	err := c.run()
+	ioEnv := core.IO{}
+	err := run(context.Background(), ioEnv, p)
 	if !errors.Is(err, errTooSmall) {
 		t.Errorf("expected %v, got %v", errTooSmall, err)
 	}
@@ -26,18 +28,19 @@ func TestTooSmall(t *testing.T) {
 func TestCommandNotFound(t *testing.T) {
 	stdin := strings.NewReader("hello world")
 	p := params{maxArgs: 1, trace: false}
-	c := command(stdin, nil, nil, p)
-	err := c.run("commandnotfound", "arg1")
-	if !errors.Is(err, exec.ErrNotFound) {
-		t.Errorf("expected %v, got %v", exec.ErrNotFound, err)
+	ioEnv := core.IO{Stdin: stdin}
+	err := run(context.Background(), ioEnv, p, "commandnotfound-xyz-abc", "arg1")
+	if err == nil {
+		t.Errorf("expected error, got nil")
 	}
 }
 
 func TestEcho(t *testing.T) {
 	stdin := strings.NewReader("hello world")
 	stdout := &bytes.Buffer{}
-	c := command(stdin, stdout, nil, params{maxArgs: defaultMaxArgs})
-	err := c.run()
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout}
+	p := params{maxArgs: defaultMaxArgs}
+	err := run(context.Background(), ioEnv, p)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -51,8 +54,9 @@ func TestEchoWithMaxArgs(t *testing.T) {
 	stdin := strings.NewReader("a b c d e f g")
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	c := command(stdin, stdout, stderr, params{maxArgs: 3, trace: true})
-	err := c.run()
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout, Stderr: stderr}
+	p := params{maxArgs: 3, trace: true}
+	err := run(context.Background(), ioEnv, p)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -72,15 +76,14 @@ func TestEchoInteractive(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tty")
-	err := os.WriteFile(path, []byte("yes\nn\ny\n"), 0644)
+	err := os.WriteFile(path, []byte("yes\nn\ny\n"), 0o644)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 
-	p := params{maxArgs: 1, prompt: true, trace: true}
-	c := command(stdin, stdout, stderr, p)
-	c.tty = path
-	err = c.run()
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout, Stderr: stderr}
+	p := params{maxArgs: 1, prompt: true, trace: true, tty: path}
+	err = run(context.Background(), ioEnv, p)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -97,16 +100,14 @@ func TestEchoInteractiveControlD(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "tty")
-	// small array to simulate ^D
-	err := os.WriteFile(path, []byte("y\n"), 0644)
+	err := os.WriteFile(path, []byte("y\n"), 0o644)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
 
-	p := params{maxArgs: 1, prompt: true, trace: true}
-	c := command(stdin, stdout, stderr, p)
-	c.tty = path
-	err = c.run()
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout, Stderr: stderr}
+	p := params{maxArgs: 1, prompt: true, trace: true, tty: path}
+	err = run(context.Background(), ioEnv, p)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}
@@ -116,24 +117,12 @@ func TestEchoInteractiveControlD(t *testing.T) {
 	}
 }
 
-func TestDefaultParams(t *testing.T) {
-	p := parseParams()
-	if p.maxArgs != defaultMaxArgs {
-		t.Errorf("expected %d, got %d", defaultMaxArgs, p.maxArgs)
-	}
-	if p.trace {
-		t.Errorf("expected %t, got %t", false, p.trace)
-	}
-	if p.prompt {
-		t.Errorf("expected %t, got %t", false, p.prompt)
-	}
-}
-
 func TestNullDelimiter(t *testing.T) {
 	stdin := strings.NewReader("hello\x00world")
 	stdout := &bytes.Buffer{}
-	c := command(stdin, stdout, nil, params{maxArgs: defaultMaxArgs, null: true})
-	err := c.run()
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout}
+	p := params{maxArgs: defaultMaxArgs, null: true}
+	err := run(context.Background(), ioEnv, p)
 	if err != nil {
 		t.Fatalf("expected nil, got %v", err)
 	}

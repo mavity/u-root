@@ -13,16 +13,17 @@
 //	-m: directory mode (ex: 755)
 //	-v: print each directory as it is made
 //	-p: make all needed directories in the path
-package main
+package mkdir
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"strconv"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
@@ -42,11 +43,11 @@ type flags struct {
 	verbose bool
 }
 
-func mkdir(stdout, stderr io.Writer, args []string) error {
+func mkdir(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
 
 	fs := flag.NewFlagSet("mkdir", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs.SetOutput(ioEnv.Stderr)
 
 	fs.StringVar(&f.mode, "m", "", "Directory mode")
 	fs.BoolVar(&f.mkall, "p", false, "Make all needed directories in the path")
@@ -97,23 +98,41 @@ func mkdir(stdout, stderr io.Writer, args []string) error {
 
 	var errs error
 	for _, name := range fs.Args() {
-		if err := fm(name, createMode); err != nil {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		resolvedName := ioEnv.ResolvePath(name)
+		if err := fm(resolvedName, createMode); err != nil {
 			errs = errors.Join(errs, err)
 			continue
 		}
 		if f.verbose {
-			fmt.Fprintf(stdout, "%v\n", name)
+			fmt.Fprintf(ioEnv.Stdout, "%v\n", name)
 		}
 		if f.mode != "" {
-			os.Chmod(name, createMode)
+			_ = os.Chmod(resolvedName, createMode)
 		}
 	}
 	return errs
 }
 
-func main() {
-	if err := mkdir(os.Stdout, os.Stderr, os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+// Main runs the mkdir command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "mkdir: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := mkdir(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "mkdir: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

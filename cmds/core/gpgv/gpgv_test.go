@@ -1,15 +1,18 @@
 // Copyright 2016-2017 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-package main
+package gpgv
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestRunGPGV(t *testing.T) {
@@ -99,10 +102,24 @@ func TestRunGPGV(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
+			ioEnv := core.IO{
+				Stdout: &buf,
+				Stderr: &buf,
+			}
+			var args []string
+			if tt.keyfile != "" {
+				args = append(args, tt.keyfile)
+			}
+			if tt.sigfile != "" {
+				args = append(args, tt.sigfile)
+			}
+			if tt.datafile != "" {
+				args = append(args, tt.datafile)
+			}
 
-			if err := runGPGV(&buf, tt.keyfile, tt.sigfile, tt.datafile); !errors.Is(err, tt.wantErr) {
-				if !strings.Contains(err.Error(), tt.wantErr.Error()) {
-					t.Errorf("runGPGV(&buf, verbose, args):= %q, want %q", err, tt.wantErr)
+			if err := run(context.Background(), ioEnv, args...); !errors.Is(err, tt.wantErr) {
+				if err == nil || tt.wantErr == nil || !strings.Contains(err.Error(), tt.wantErr.Error()) {
+					t.Errorf("run(%v):= %q, want %q", args, err, tt.wantErr)
 				}
 			}
 		})

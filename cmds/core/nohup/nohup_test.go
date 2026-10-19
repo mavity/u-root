@@ -3,12 +3,13 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package nohup
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"golang.org/x/term"
@@ -45,11 +46,22 @@ func TestRun(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			origDir, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("can't getwd: %v", err)
+			}
 			dir := t.TempDir()
-			err := os.Chdir(dir)
+			err = os.Chdir(dir)
 			if err != nil {
 				t.Fatalf("can't chdir into %q", dir)
 			}
+			defer os.Chdir(origDir)
+
+			if runtime.GOOS == "windows" {
+				_ = os.WriteFile(filepath.Join(dir, "false.bat"), []byte("@exit 1\r\n"), 0o777)
+				_ = os.WriteFile(filepath.Join(dir, "echo.bat"), []byte("@echo %*\r\n"), 0o777)
+			}
+			t.Setenv("PATH", dir+string(filepath.ListSeparator)+os.Getenv("PATH"))
 
 			err = run(test.args)
 

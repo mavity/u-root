@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9 && !windows
+//go:build unix
 
-package main
+package kill
 
 import (
 	"errors"
@@ -28,7 +28,6 @@ func kill(sig os.Signal, pids ...string) error {
 		if err := syscall.Kill(pid, s); err != nil {
 			errs = errors.Join(errs, err)
 		}
-
 	}
 	return errs
 }

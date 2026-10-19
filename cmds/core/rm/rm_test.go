@@ -2,16 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package rm
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func setup(t *testing.T) string {
@@ -42,12 +45,12 @@ func setup(t *testing.T) string {
 	} {
 		var (
 			err      error
-			filepath = filepath.Join(d, f.name)
+			fpath = filepath.Join(d, f.name)
 		)
 		if f.isdir {
-			err = os.Mkdir(filepath, f.mode)
+			err = os.Mkdir(fpath, f.mode)
 		} else {
-			err = os.WriteFile(filepath, fbody, f.mode)
+			err = os.WriteFile(fpath, fbody, f.mode)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -143,8 +146,13 @@ func TestRm(t *testing.T) {
 				args = append(args, filepath.Join(d, file))
 			}
 
-			err := rm(buf, io.Discard, io.Discard, args...)
-			if !errors.Is(err, tt.err) {
+			ioEnv := core.IO{Stdin: buf, Stdout: io.Discard, Stderr: io.Discard}
+			err := rm(context.Background(), ioEnv, args...)
+			if tt.err == syscall.ENOTEMPTY {
+				if err == nil {
+					t.Fatalf("expected error for directory not empty, got nil")
+				}
+			} else if !errors.Is(err, tt.err) {
 				t.Errorf("expected %v, got %v", tt.err, err)
 			}
 		})

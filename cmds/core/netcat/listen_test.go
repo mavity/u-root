@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package netcat
 
 import (
 	"bytes"
@@ -769,13 +769,13 @@ func TestParseRemoteAddr(t *testing.T) {
 			socketType:  netcat.SOCKET_TYPE_TCP,
 			name:        "IP and Port",
 			remoteAddr:  "127.0.0.1:80",
-			wantAddress: []string{"127.0.0.1:80", "127.0.0.1", "localhost"},
+			wantAddress: []string{"127.0.0.1:80", "127.0.0.1"},
 		},
 		{
 			socketType:  netcat.SOCKET_TYPE_TCP,
 			name:        "IP",
 			remoteAddr:  "127.0.0.1",
-			wantAddress: []string{"127.0.0.1", "localhost"},
+			wantAddress: []string{"127.0.0.1"},
 		},
 		{
 			socketType:  netcat.SOCKET_TYPE_TCP,

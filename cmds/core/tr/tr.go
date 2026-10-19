@@ -2,49 +2,21 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// tr - translate or delete characters
-
-// Synopsis:
-//     tr [OPTION]... SET1 [SET2]
-
-// Description:
-//     Translate, squeeze, and/or delete characters from standard input, writing
-//     to standard output.
-//
-//     -d, --delete: delete characters in SET1, do not translate
-//
-// SETs  are  specified  as  strings of characters. Most represent themselves.
-// Interpreted sequences are:
-//     \\        backslash
-//     \a        audible BEL
-//     \b        backspace
-//     \f        form feed
-//     \n        new line
-//     \r        return
-//     \t        horizontal tab
-//     \v        vertical tab
-//     [:alnum:] all letters and digits
-//     [:alpha:] all letters
-//     [:digit:] all digits
-//     [:graph:] all printable characters
-//     [:cntrl:] all control characters
-//     [:lower:] all lower case letters
-//     [:upper:] all upper case letters
-//     [:space:] all whitespaces
-
-package main
+// Package tr translates or deletes characters.
+package tr
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"unicode"
-)
 
-var del bool
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
+)
 
 type cmd struct {
 	stdin  io.Reader
@@ -65,6 +37,14 @@ func command(in io.Reader, out io.Writer, args []string, del bool) (*cmd, error)
 		del:    del,
 		tr:     tr,
 	}, nil
+}
+
+func (c *cmd) run() error {
+	ioEnv := core.IO{
+		Stdin:  c.stdin,
+		Stdout: c.stdout,
+	}
+	return runTr(context.Background(), ioEnv, c.tr, false, nil)
 }
 
 const name = "tr"
@@ -98,7 +78,6 @@ var sets = map[Set]func(r rune) bool{
 	ALNUM: func(r rune) bool {
 		return unicode.IsLetter(r) || unicode.IsDigit(r)
 	},
-
 	ALPHA: unicode.IsLetter,
 	DIGIT: unicode.IsDigit,
 	GRAPH: unicode.IsGraphic,
@@ -127,17 +106,13 @@ func setToRune(s Set, outRune rune) *transformer {
 
 func lowerToUpper() *transformer {
 	return &transformer{
-		transform: func(r rune) rune {
-			return unicode.ToUpper(r)
-		},
+		transform: unicode.ToUpper,
 	}
 }
 
 func upperToLower() *transformer {
 	return &transformer{
-		transform: func(r rune) rune {
-			return unicode.ToLower(r)
-		},
+		transform: unicode.ToLower,
 	}
 }
 
@@ -158,47 +133,45 @@ func runesToRunes(in []rune, out ...rune) *transformer {
 	}
 }
 
-func (c *cmd) run() error {
-	in := bufio.NewReader(c.stdin)
-	out := bufio.NewWriter(c.stdout)
-
-	defer out.Flush()
-
-	for {
-		inRune, size, err := in.ReadRune()
-		if inRune == unicode.ReplacementChar {
-			// can skip error handling here, because
-			// previous operation was in.ReadRune()
-			in.UnreadRune()
-
-			b, err := in.ReadByte()
-			if err != nil {
-				return fmt.Errorf("read error: %w", err)
+func expandRange(runes []rune) []rune {
+	var res []rune
+	for i := 0; i < len(runes); i++ {
+		if i+2 < len(runes) && runes[i+1] == '-' && runes[i] <= runes[i+2] {
+			for r := runes[i]; r <= runes[i+2]; r++ {
+				res = append(res, r)
 			}
-
-			if err := out.WriteByte(b); err != nil {
-				return fmt.Errorf("write error: %w", err)
-			}
-		} else if size > 0 {
-			if outRune := c.tr.transform(inRune); outRune != unicode.ReplacementChar {
-				if _, err := out.WriteRune(outRune); err != nil {
-					return fmt.Errorf("write error: %w", err)
-				}
-			}
-		}
-
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			return err
+			i += 2
+		} else {
+			res = append(res, runes[i])
 		}
 	}
+	return res
+}
+
+func unescape(s Set) ([]rune, error) {
+	var out []rune
+	var escape bool
+	for _, r := range s {
+		if escape {
+			v, ok := escapeChars[r]
+			if !ok {
+				return nil, fmt.Errorf("unknown escape sequence '\\%c'", r)
+			}
+			out = append(out, v)
+			escape = false
+			continue
+		}
+		if r == '\\' {
+			escape = true
+			continue
+		}
+		out = append(out, r)
+	}
+	return expandRange(out), nil
 }
 
 func parse(args []string, del bool) (*transformer, error) {
 	narg := len(args)
-
 	switch {
 	case narg == 0 || (narg == 1 && !del):
 		return nil, fmt.Errorf("missing operand")
@@ -250,41 +223,118 @@ func parse(args []string, del bool) (*transformer, error) {
 	return runesToRunes(arg1, arg2...), nil
 }
 
-func unescape(s Set) ([]rune, error) {
-	var out []rune
-	var escape bool
-	for _, r := range s {
-		if escape {
-			v, ok := escapeChars[r]
-			if !ok {
-				return nil, fmt.Errorf("unknown escape sequence '\\%c'", r)
+func runTr(ctx context.Context, ioEnv core.IO, tr *transformer, squeeze bool, sqSet map[rune]bool) error {
+	in := bufio.NewReader(ioEnv.Stdin)
+	out := bufio.NewWriter(ioEnv.Stdout)
+	defer out.Flush()
+
+	var prevRune rune
+	hasPrev := false
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		inRune, size, err := in.ReadRune()
+		if inRune == unicode.ReplacementChar && size == 1 {
+			_ = in.UnreadRune()
+			b, berr := in.ReadByte()
+			if berr != nil {
+				if berr == io.EOF {
+					return nil
+				}
+				return fmt.Errorf("read error: %w", berr)
 			}
-			out = append(out, v)
-			escape = false
-			continue
+			if werr := out.WriteByte(b); werr != nil {
+				return fmt.Errorf("write error: %w", werr)
+			}
+			hasPrev = false
+		} else if size > 0 {
+			outRune := tr.transform(inRune)
+			if outRune != unicode.ReplacementChar {
+				if squeeze && hasPrev && outRune == prevRune && (len(sqSet) == 0 || sqSet[outRune]) {
+					// duplicate squeezed
+				} else {
+					if _, werr := out.WriteRune(outRune); werr != nil {
+						return fmt.Errorf("write error: %w", werr)
+					}
+					prevRune = outRune
+					hasPrev = true
+				}
+			}
 		}
 
-		if r == '\\' {
-			escape = true
-			continue
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
-
-		out = append(out, r)
 	}
-	return out, nil
 }
 
-func main() {
-	flag.BoolVar(&del, "delete", false, "delete characters in SET1, do not translate")
-	flag.BoolVar(&del, "d", false, "delete characters in SET1, do not translate (shorthand)")
+// Main runs the tr command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "tr: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
 
-	flag.Parse()
+	var del, squeeze bool
+	fs := flag.NewFlagSet("tr", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&del, "delete", false, "delete characters in SET1, do not translate")
+	fs.BoolVar(&del, "d", false, "delete characters in SET1, do not translate (shorthand)")
+	fs.BoolVar(&squeeze, "squeeze-repeats", false, "squeeze repeated characters")
+	fs.BoolVar(&squeeze, "s", false, "squeeze repeated characters (shorthand)")
 
-	cmd, err := command(os.Stdin, os.Stdout, flag.Args(), del)
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	rest := fs.Args()
+	if squeeze && !del && len(rest) == 1 {
+		sqRunes, err := unescape(Set(rest[0]))
+		if err != nil {
+			fmt.Fprintf(ioEnv.Stderr, "tr: %v\n", err)
+			return 1
+		}
+		sqSet := make(map[rune]bool, len(sqRunes))
+		for _, r := range sqRunes {
+			sqSet[r] = true
+		}
+		if _, ok := sets[Set(rest[0])]; ok {
+			sqSet = map[rune]bool{}
+		}
+		if err := runTr(ctx, ioEnv, &transformer{transform: func(r rune) rune { return r }}, true, sqSet); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return 130
+			}
+			fmt.Fprintf(ioEnv.Stderr, "tr: %v\n", err)
+			return 1
+		}
+		return 0
+	}
+
+	tr, err := parse(rest, del)
 	if err != nil {
-		log.Fatalf("%s: %v\n", name, err)
+		fmt.Fprintf(ioEnv.Stderr, "tr: %v\n", err)
+		return 1
 	}
-	if err := cmd.run(); err != nil {
-		log.Fatalf("%s: %v\n", name, err)
+
+	if err := runTr(ctx, ioEnv, tr, squeeze, nil); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "tr: %v\n", err)
+		return 1
 	}
+	return 0
 }

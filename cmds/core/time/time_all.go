@@ -4,7 +4,7 @@
 
 //go:build !tinygo
 
-package main
+package timecmd
 
 import (
 	"io"
@@ -12,7 +12,9 @@ import (
 )
 
 func printProcessState(w io.Writer, c *exec.Cmd) {
-	if c.ProcessState == nil {
+	if c == nil || c.ProcessState == nil {
+		printTime(w, "user", 0)
+		printTime(w, "sys", 0)
 		return
 	}
 	printTime(w, "user", c.ProcessState.UserTime())

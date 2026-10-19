@@ -18,23 +18,21 @@
 //	-Q: quoted
 //	-R: equivalent to findutil's find
 //	-S: sort by size
-//
-// Bugs:
-//
-//	With the `-R` flag, directories are only ever printed once.
-package main
+//	-p: print final path element (Plan 9)
+package lscmd
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"text/tabwriter"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/ls"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
@@ -49,33 +47,9 @@ type cmd struct {
 	recurse   bool
 	classify  bool
 	size      bool
+	final     bool
 }
 
-// file describes a file, its name, attributes, and the error
-// accessing it, if any.
-//
-// Any such description must take into account the inherently
-// racy nature of a file system. Can a file which exists in one
-// instant vanish in another instant? Yes. Can we get into situations
-// in which ls might never terminate? Yes (seen in HPC systems).
-// If our consumer (ls) is slow enough, and our producer (thousands of
-// compute nodes) is fast enough, an ls can take *hours*.
-//
-// Hence, file must include the path name (since a file can vanish,
-// the stat might then fail, so using the fileinfo will not work)
-// and must include an error (since the file may cease to exist).
-// It is possible, for example, to do
-// ls /a /b /c
-// and between the time the command is typed, some or all of these
-// files might vanish. Users wish to know of this situation:
-// $ ls /a /b /tmp
-// ls: /a: No such file or directory
-// ls: /b: No such file or directory
-// ls: /c: No such file or directory
-// ls is more complex than it appears at first.
-// TODO: do we really need BOTH osfi and lsfi?
-// This may be required on non-unix systems like Plan 9 but it
-// would be nice to make sure.
 type file struct {
 	path string
 	osfi os.FileInfo
@@ -83,10 +57,22 @@ type file struct {
 	err  error
 }
 
-func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
+func (c cmd) listNameWithCtx(ctx context.Context, stringer ls.Stringer, d string, prefix bool, resolvePath func(string) string) (bool, error) {
 	var files []file
+	hasError := false
 
-	filepath.Walk(d, func(path string, osfi os.FileInfo, err error) error {
+	resolved := d
+	if resolvePath != nil {
+		resolved = resolvePath(d)
+	}
+
+	walkErr := filepath.Walk(resolved, func(path string, osfi os.FileInfo, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		f := file{
 			path: path,
 			osfi: osfi,
@@ -95,7 +81,7 @@ func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
 		// error handling that matches standard ls is ... a real joy
 		if osfi != nil && !errors.Is(err, os.ErrNotExist) {
 			f.lsfi = ls.FromOSFileInfo(path, osfi)
-			if err != nil && path == d {
+			if err != nil && path == resolved {
 				f.err = err
 			}
 		} else {
@@ -108,16 +94,19 @@ func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
 			return filepath.SkipDir
 		}
 
-		if !c.recurse && path == d && c.directory {
+		if !c.recurse && path == resolved && c.directory {
 			return filepath.SkipDir
 		}
 
-		if path != d && f.lsfi.Mode.IsDir() && !c.recurse {
+		if path != resolved && f.lsfi.Mode.IsDir() && !c.recurse {
 			return filepath.SkipDir
 		}
 
 		return nil
 	})
+	if walkErr != nil && !errors.Is(walkErr, filepath.SkipDir) {
+		return true, walkErr
+	}
 
 	if c.size {
 		sort.SliceStable(files, func(i, j int) bool {
@@ -127,20 +116,29 @@ func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
 
 	for _, f := range files {
 		if f.err != nil {
+			hasError = true
 			c.printFile(stringer, f)
 			continue
 		}
 		if c.recurse {
 			// Mimic find command
-			f.lsfi.Name = f.path
-		} else if f.path == d {
+			if d != resolved {
+				if rel, err := filepath.Rel(resolved, f.path); err == nil && rel != "." {
+					f.lsfi.Name = filepath.Join(d, rel)
+				} else {
+					f.lsfi.Name = d
+				}
+			} else {
+				f.lsfi.Name = f.path
+			}
+		} else if f.path == resolved {
 			if c.directory {
 				fmt.Fprintln(c.w, stringer.FileString(f.lsfi))
 				continue
 			}
 
 			// Starting directory is a dot when non-recursive
-			if f.osfi.IsDir() {
+			if f.osfi != nil && f.osfi.IsDir() {
 				f.lsfi.Name = "."
 				if prefix {
 					if c.quoted {
@@ -155,7 +153,12 @@ func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
 		c.printFile(stringer, f)
 	}
 
-	return nil
+	return hasError, nil
+}
+
+func (c cmd) listName(stringer ls.Stringer, d string, prefix bool) error {
+	_, err := c.listNameWithCtx(context.Background(), stringer, d, prefix, nil)
+	return err
 }
 
 func indicator(fi ls.FileInfo) string {
@@ -177,7 +180,7 @@ func indicator(fi ls.FileInfo) string {
 	return ""
 }
 
-func (c cmd) list(names []string) error {
+func (c cmd) list(ctx context.Context, names []string, resolvePath func(string) string) (bool, error) {
 	if len(names) == 0 {
 		names = []string{"."}
 	}
@@ -196,13 +199,18 @@ func (c cmd) list(names []string) error {
 	}
 	// Is a name a directory? If so, list it in its own section.
 	prefix := len(names) > 1
+	hasAnyError := false
 	for _, d := range names {
-		if err := c.listName(s, d, prefix); err != nil {
-			return fmt.Errorf("error while listing %q: %w", d, err)
+		hadErr, err := c.listNameWithCtx(ctx, s, d, prefix, resolvePath)
+		if err != nil {
+			return true, fmt.Errorf("error while listing %q: %w", d, err)
+		}
+		if hadErr {
+			hasAnyError = true
 		}
 		tw.Flush()
 	}
-	return nil
+	return hasAnyError, nil
 }
 
 // run runs a command. args are as from os.Args, i.e., args[0] is the command name.
@@ -217,6 +225,7 @@ func run(w io.Writer, args []string) error {
 	f.BoolVar(&c.recurse, "R", false, "equivalent to findutil's find")
 	f.BoolVar(&c.classify, "F", false, "append indicator (, one of */=>@|) to entries")
 	f.BoolVar(&c.size, "S", false, "sort by size")
+	f.BoolVar(&c.final, "p", false, "Print only the final path element of each file name")
 	c.w = w
 
 	f.Usage = func() {
@@ -225,12 +234,50 @@ func run(w io.Writer, args []string) error {
 		f.PrintDefaults()
 	}
 
-	f.Parse(unixflag.ArgsToGoArgs(args[1:]))
-	return c.list(f.Args())
+	if err := f.Parse(unixflag.ArgsToGoArgs(args[1:])); err != nil {
+		return err
+	}
+	_, err := c.list(context.Background(), f.Args(), nil)
+	return err
 }
 
-func main() {
-	if err := run(os.Stdout, os.Args); err != nil {
-		log.Fatal(err)
+// Main runs ls reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "ls panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var c cmd
+	f := flag.NewFlagSet("ls", flag.ContinueOnError)
+	f.SetOutput(ioEnv.Stderr)
+	f.BoolVar(&c.all, "a", false, "show hidden files")
+	f.BoolVar(&c.human, "h", false, "human readable sizes")
+	f.BoolVar(&c.directory, "d", false, "list directories but not their contents")
+	f.BoolVar(&c.long, "l", false, "long form")
+	f.BoolVar(&c.quoted, "Q", false, "quoted")
+	f.BoolVar(&c.recurse, "R", false, "equivalent to findutil's find")
+	f.BoolVar(&c.classify, "F", false, "append indicator (, one of */=>@|) to entries")
+	f.BoolVar(&c.size, "S", false, "sort by size")
+	f.BoolVar(&c.final, "p", false, "Print only the final path element of each file name")
+	c.w = ioEnv.Stdout
+
+	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
 	}
+
+	hasError, err := c.list(ctx, f.Args(), ioEnv.ResolvePath)
+	if err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "ls: %v\n", err)
+		return 1
+	}
+	if hasError {
+		return 1
+	}
+	return 0
 }

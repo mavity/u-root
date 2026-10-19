@@ -15,17 +15,17 @@
 //	-R: remove file hierarchies
 //	-r: equivalent to -R
 //	-f: ignore nonexistent files and never prompt
-package main
+package rm
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"log"
 	"os"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
@@ -38,10 +38,10 @@ type flags struct {
 	force       bool
 }
 
-func rm(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
 	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs.SetOutput(ioEnv.Stderr)
 
 	fs.BoolVar(&f.interactive, "i", false, "Interactive mode.")
 	fs.BoolVar(&f.verbose, "v", false, "Verbose mode.")
@@ -73,17 +73,24 @@ func rm(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 		f.interactive = false
 	}
 
-	input := bufio.NewReader(stdin)
+	input := bufio.NewReader(ioEnv.Stdin)
 	for _, file := range files {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if f.interactive {
-			fmt.Fprintf(stdout, "rm: remove '%v'? ", file)
+			fmt.Fprintf(ioEnv.Stdout, "rm: remove '%v'? ", file)
 			answer, err := input.ReadString('\n')
-			if err != nil || (answer[0] != 'y' && answer[0] != 'Y') {
+			if err != nil || len(answer) == 0 || (answer[0] != 'y' && answer[0] != 'Y') {
 				continue
 			}
 		}
 
-		if err := rmf(file); err != nil {
+		resolvedFile := ioEnv.ResolvePath(file)
+		if err := rmf(resolvedFile); err != nil {
 			if f.force && errors.Is(err, os.ErrNotExist) {
 				continue
 			}
@@ -91,14 +98,26 @@ func rm(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 		}
 
 		if f.verbose {
-			fmt.Fprintf(stdout, "removed %q\n", file)
+			fmt.Fprintf(ioEnv.Stdout, "removed %q\n", file)
 		}
 	}
 	return nil
 }
 
-func main() {
-	if err := rm(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]...); err != nil {
-		log.Fatal(err)
+// Main runs the rm command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "rm: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := rm(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "rm: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

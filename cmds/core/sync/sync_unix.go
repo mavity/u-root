@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !linux && !plan9 && !windows
+//go:build (darwin || freebsd || netbsd || openbsd) && !linux
 
-package main
+package sync
 
 import (
 	"fmt"

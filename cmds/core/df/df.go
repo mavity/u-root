@@ -1,38 +1,29 @@
-// Copyright 2015-2017 the u-root Authors. All rights reserved
+// Copyright 2015-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-
-//go:build !plan9 && !windows
 
 // df reports details of mounted filesystems.
 //
 // Synopsis
 //
-//	df [-k] [-m]
-//
-// Description
-//
-//	read mount information from /proc/mounts and
-//	statfs syscall and display summary information for all
-//	mount points that have a non-zero block count.
-//	Users can choose to see the display in KB or MB.
+//	df [-k] [-m] [file...]
 //
 // Options
 //
 //	-k: display values in KB (default)
 //	-m: display values in MB
-package main
+package df
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"math"
 	"os"
-	"syscall"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 type flags struct {
@@ -40,31 +31,18 @@ type flags struct {
 	m bool
 }
 
-var (
-	fargs = flags{}
-	units uint64
+const (
+	B  uint64 = 1
+	KB uint64 = 1024 * B
+	MB uint64 = 1024 * KB
+)
 
+var (
 	errKMExclusiv = errors.New("options -k and -m are mutually exclusive")
 )
 
-func init() {
-	flag.BoolVar(&fargs.k, "k", false, "Express the values in kilobytes (default)")
-	flag.BoolVar(&fargs.m, "m", false, "Express the values in megabytes")
-}
-
-const (
-	// B is Bytes
-	B = 1
-	// KB is kilobytes
-	KB = 1024 * B
-	// MB is megabytes
-	MB = 1024 * KB
-
-	procmountsFile = "/proc/mounts"
-)
-
 // Mount is a structure used to contain mount point data
-type mount struct {
+type Mount struct {
 	Device         string
 	MountPoint     string
 	FileSystemType string
@@ -77,87 +55,22 @@ type mount struct {
 	PCT            uint8
 }
 
-type mountinfomap map[string]mount
-
-// mountinfo returns a map of mounts representing
-// the data in /proc/mounts
-func mountinfo() (mountinfomap, error) {
-	buf, err := os.ReadFile(procmountsFile)
-	if err != nil {
-		return nil, err
-	}
-	return mountinfoFromBytes(buf)
-}
-
-// returns a map generated from the bytestream returned
-// from /proc/mounts
-// for tidiness, we decide to ignore filesystems of size 0
-// to exclude cgroup, procfs and sysfs types
-func mountinfoFromBytes(buf []byte) (mountinfomap, error) {
-	ret := make(mountinfomap)
-	for line := range bytes.SplitSeq(buf, []byte{'\n'}) {
-		kv := bytes.SplitN(line, []byte{' '}, 6)
-		if len(kv) != 6 {
-			// can't interpret this
-			continue
-		}
-		key := string(kv[1])
-		var mnt mount
-		mnt.Device = string(kv[0])
-		mnt.MountPoint = string(kv[1])
-		mnt.FileSystemType = string(kv[2])
-		mnt.Flags = string(kv[3])
-		if err := diskUsage(&mnt); err != nil {
-			return nil, err
-		}
-		if mnt.Blocks == 0 {
-			continue
-		}
-		ret[key] = mnt
-	}
-	return ret, nil
-}
-
-// diskUsage calculates the usage statistics of a mount point
-// note: arm7 Bsize is int32; all others are int64
-func diskUsage(mnt *mount) error {
-	fs := syscall.Statfs_t{}
-	if err := syscall.Statfs(mnt.MountPoint, &fs); err != nil {
-		// skip mount point if df is running without root
-		if os.IsPermission(err) {
-			return nil
-		}
-		return err
-	}
-	mnt.Blocks = fs.Blocks * uint64(fs.Bsize) / units
-	mnt.Bsize = int64(fs.Bsize)
-	mnt.Total = fs.Blocks * uint64(fs.Bsize) / units
-	mnt.Avail = uint64(fs.Bavail) * uint64(fs.Bsize) / units
-	mnt.Used = (fs.Blocks - fs.Bfree) * uint64(fs.Bsize) / units
-	pct := float64((fs.Blocks - fs.Bfree)) * 100 / float64(fs.Blocks)
-	mnt.PCT = uint8(math.Ceil(pct))
-	return nil
-}
-
-// setUnits takes the command line flags and configures
-// the correct units used to calculate display values
-func setUnits(inKB, inMB bool) error {
+// setUnits returns the correct units used to calculate display values
+func setUnits(inKB, inMB bool) (uint64, error) {
 	if inKB && inMB {
-		return errKMExclusiv
+		return 0, errKMExclusiv
 	}
 	if inMB {
-		units = MB
-	} else {
-		units = KB
+		return MB, nil
 	}
-	return nil
+	return KB, nil
 }
 
 func printHeader(w io.Writer, blockSize string) {
 	fmt.Fprintf(w, "Filesystem           Type         %v-blocks       Used    Available  Use%% Mounted on\n", blockSize)
 }
 
-func printMount(w io.Writer, mnt mount) {
+func printMount(w io.Writer, mnt Mount) {
 	fmt.Fprintf(w, "%-20v %-9v %12v %10v %12v %4v%% %-13v\n",
 		mnt.Device,
 		mnt.FileSystemType,
@@ -169,12 +82,13 @@ func printMount(w io.Writer, mnt mount) {
 }
 
 func df(w io.Writer, fargs flags, args []string) error {
-	if err := setUnits(fargs.k, fargs.m); err != nil {
+	units, err := setUnits(fargs.k, fargs.m)
+	if err != nil {
 		return err
 	}
-	mounts, err := mountinfo()
+	mounts, err := getMounts(units)
 	if err != nil {
-		return fmt.Errorf("mountinfo()=_,%w, want: _,nil", err)
+		return fmt.Errorf("mountinfo: %w", err)
 	}
 	blocksize := "1K"
 	if fargs.m {
@@ -186,7 +100,6 @@ func df(w io.Writer, fargs flags, args []string) error {
 		for _, mnt := range mounts {
 			printMount(w, mnt)
 		}
-
 		return nil
 	}
 
@@ -197,7 +110,6 @@ func df(w io.Writer, fargs flags, args []string) error {
 			fmt.Fprintf(os.Stderr, "df: %v\n", err)
 			continue
 		}
-
 		fileDevs = append(fileDevs, fileDev)
 	}
 
@@ -223,9 +135,37 @@ func df(w io.Writer, fargs flags, args []string) error {
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := df(os.Stdout, fargs, flag.Args()); err != nil {
-		log.Fatal(err)
+// Main runs the df command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "df: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	fs := flag.NewFlagSet("df", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	var fargs flags
+	fs.BoolVar(&fargs.k, "k", false, "Express the values in kilobytes (default)")
+	fs.BoolVar(&fargs.m, "m", false, "Express the values in megabytes")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
 	}
+
+	resolvedArgs := make([]string, len(fs.Args()))
+	for i, a := range fs.Args() {
+		resolvedArgs[i] = ioEnv.ResolvePath(a)
+	}
+
+	if err := df(ioEnv.Stdout, fargs, resolvedArgs); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "df: %v\n", err)
+		return 1
+	}
+	return 0
 }

@@ -4,7 +4,7 @@
 
 //go:build plan9
 
-package main
+package hostname
 
 import "os"
 

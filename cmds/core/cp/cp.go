@@ -17,19 +17,20 @@
 //	-f: force overwrite files
 //	-v: verbose copy mode
 //	-P: don't follow symlinks
-package main
+package cpcmd
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/cp"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
@@ -52,7 +53,7 @@ func promptOverwrite(dst string, out io.Writer, in *bufio.Reader) (bool, error) 
 		return false, err
 	}
 
-	if strings.ToLower(answer)[0] != 'y' {
+	if len(answer) == 0 || strings.ToLower(answer)[0] != 'y' {
 		return false, nil
 	}
 
@@ -77,7 +78,6 @@ func setupPreCallback(recursive, ask, force bool, writer io.Writer, reader bufio
 		}
 
 		// dst does exist.
-
 		if os.SameFile(srcfi, dstfi) {
 			fmt.Fprintf(writer, "cp: %q and %q are the same file\n", src, dst)
 			return cp.ErrSkip
@@ -103,8 +103,8 @@ func setupPostCallback(verbose bool, w io.Writer) func(src, dst string) {
 	}
 }
 
-// run evaluates the flags and args and makes decisions for copyfiles
-func run(args []string, w io.Writer, i *bufio.Reader) error {
+// runWithCtx evaluates the flags and args and makes decisions for copyfiles
+func runWithCtx(ctx context.Context, args []string, w io.Writer, i *bufio.Reader, resolvePath func(string) string) error {
 	var f flags
 
 	fs := flag.NewFlagSet("cp", flag.ContinueOnError)
@@ -133,6 +133,9 @@ func run(args []string, w io.Writer, i *bufio.Reader) error {
 	}
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
@@ -141,9 +144,16 @@ func run(args []string, w io.Writer, i *bufio.Reader) error {
 		return errUsage
 	}
 
+	rawFrom := fs.Args()[:fs.NArg()-1]
+	rawTo := fs.Args()[fs.NArg()-1]
+
+	resolvedTo := rawTo
+	if resolvePath != nil {
+		resolvedTo = resolvePath(rawTo)
+	}
+
 	todir := false
-	from, to := fs.Args()[:fs.NArg()-1], fs.Args()[fs.NArg()-1]
-	toStat, err := os.Stat(to)
+	toStat, err := os.Stat(resolvedTo)
 	if err == nil {
 		todir = toStat.IsDir()
 	}
@@ -151,40 +161,69 @@ func run(args []string, w io.Writer, i *bufio.Reader) error {
 		return eNotDir
 	}
 
+	var reader bufio.Reader
+	if i != nil {
+		reader = *i
+	} else {
+		reader = *bufio.NewReader(strings.NewReader(""))
+	}
+
 	opts := cp.Options{
 		NoFollowSymlinks: f.noFollowSymlinks,
-
-		// cp the command makes sure that
-		//
-		// (1) the files it's copying aren't already the same,
-		// (2) the user is asked about overwriting an existing file if
-		//     one is already there.
-		PreCallback: setupPreCallback(f.recursive, f.ask, f.force, w, *i),
-
-		PostCallback: setupPostCallback(f.verbose, w),
+		PreCallback:      setupPreCallback(f.recursive, f.ask, f.force, w, reader),
+		PostCallback:     setupPostCallback(f.verbose, w),
 	}
 
 	var lastErr error
-	for _, file := range from {
-		dst := to
+	for _, file := range rawFrom {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		src := file
+		if resolvePath != nil {
+			src = resolvePath(file)
+		}
+		dst := resolvedTo
 		if todir {
 			dst = filepath.Join(dst, filepath.Base(file))
 		}
 		if f.recursive {
-			lastErr = opts.CopyTree(file, dst)
+			lastErr = opts.CopyTree(src, dst)
 		} else {
-			lastErr = opts.Copy(file, dst)
+			lastErr = opts.Copy(src, dst)
+		}
+		if lastErr != nil {
+			break
 		}
 	}
 	return lastErr
 }
 
-func main() {
-	err := run(os.Args[1:], os.Stderr, bufio.NewReader(os.Stdin))
-	if err != nil {
-		if errors.Is(err, errUsage) {
-			os.Exit(1)
+// run evaluates the flags and args and makes decisions for copyfiles
+func run(args []string, w io.Writer, i *bufio.Reader) error {
+	return runWithCtx(context.Background(), args, w, i, nil)
+}
+
+// Main runs cp reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "cp panic: %v\n", r)
+			exitCode = 1
 		}
-		log.Fatal(err)
+	}()
+
+	var reader *bufio.Reader
+	if ioEnv.Stdin != nil {
+		reader = bufio.NewReader(ioEnv.Stdin)
 	}
+
+	if err := runWithCtx(ctx, args, ioEnv.Stderr, reader, ioEnv.ResolvePath); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "cp: %v\n", err)
+		return 1
+	}
+	return 0
 }

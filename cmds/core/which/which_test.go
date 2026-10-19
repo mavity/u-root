@@ -2,110 +2,49 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// created by Rafael Campos Nunes <rafaelnunes@engineer.com>
-
-package main
+package which
 
 import (
 	"bytes"
+	"context"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
-type commands struct {
-	name      string
-	pathOnSys []byte
-}
-
-// in setup we fill the pathOnSys variables with their corresponding path on the system.
-var (
-	tests = []commands{
-		{
-			"cat",
-			[]byte{},
-		},
-		{
-			"which",
-			[]byte{},
-		},
-		{
-			"sed",
-			[]byte{},
-		},
-		{
-			"ldd",
-			[]byte{},
-		},
-	}
-
-	p = os.Getenv("PATH")
-)
-
-func setup(t *testing.T) {
-	var err error
-
-	for i, tt := range tests {
-		tests[i].pathOnSys, err = exec.Command("which", "-a", tt.name).Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-// TestWhichUnique tests `which` command against one POSIX command that are included in Linux.
-// The output of which.go has to be exactly equal to the output of which itself.
-func TestWhichUnique(t *testing.T) {
-	setup(t)
-
-	commands := []string{"cat"}
-	var b bytes.Buffer
-	if err := which(&b, strings.Split(p, ":"), commands[:], true); err != nil {
+func TestWhich(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmd1 := filepath.Join(tmpDir, "mycmd1")
+	if err := os.WriteFile(cmd1, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Comparing against only the cat command.
-	if !bytes.Equal(b.Bytes(), tests[0].pathOnSys) {
-		t.Fatalf("Locating commands has failed, wants: %v, got: %v", string(tests[0].pathOnSys), b.String())
-	}
-}
-
-// TestWhichMultiple tests `which` command against the three POSIX commands that are included in Linux.
-// The output of which.go has to be exactly equal to the output of which itself. If it works with
-// three, it should work with more commands as well.
-func TestWhichMultiple(t *testing.T) {
-	setup(t)
-
-	pathsCombined := []byte{}
-	commands := []string{}
-	for _, t := range tests {
-		pathsCombined = append(pathsCombined, t.pathOnSys...)
-		commands = append(commands, t.name)
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		LookupEnv: func(k string) (string, bool) {
+			if k == "PATH" {
+				return tmpDir, true
+			}
+			return "", false
+		},
 	}
 
-	var b bytes.Buffer
-	if err := which(&b, strings.Split(p, ":"), commands[:], true); err != nil {
-		t.Fatal(err)
+	if code := Main(context.Background(), ioEnv, "mycmd1"); code != 0 {
+		t.Fatalf("expected code 0, got %d, stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "mycmd1") {
+		t.Fatalf("expected stdout to contain mycmd1, got: %q", stdout.String())
 	}
 
-	if !bytes.Equal(b.Bytes(), pathsCombined) {
-		t.Fatalf("Locating commands has failed, wants: %v, got: %v", string(pathsCombined), b.String())
-	}
-}
-
-func TestWithoutAllPathTrue(t *testing.T) {
-	r1, err := exec.Command("which", "cat", "ldd").Output()
-	if err != nil {
-		t.Fatalf("system which has failed: %v", err)
-	}
-
-	var b bytes.Buffer
-	if err := which(&b, strings.Split(p, ":"), []string{"cat", "ldd"}, false); err != nil {
-		t.Fatalf("which has failed: %v", err)
-	}
-
-	if !bytes.Equal(r1, b.Bytes()) {
-		t.Errorf("location command has failed: wants: %s, got %s", string(r1), b.String())
+	// Missing command
+	stdout.Reset()
+	stderr.Reset()
+	if code := Main(context.Background(), ioEnv, "nonexistent-cmd-xyz"); code == 0 {
+		t.Fatalf("expected non-zero exit for nonexistent command")
 	}
 }

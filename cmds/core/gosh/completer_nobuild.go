@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build (!tinygo || tinygo.enable) && !plan9 && goshsmall && !goshbubble
+//go:build (!tinygo || tinygo.enable) && !plan9 && ((goshsmall && !goshbubble) || wasip1)
 
-package main
+package gosh
 
 import (
 	"io"

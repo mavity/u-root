@@ -2,13 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package basename
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type test struct {
@@ -45,12 +49,12 @@ func TestRun(t *testing.T) {
 		},
 	}
 
-	// Table-driven testing
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("Using flags %s", tt.flags), func(t *testing.T) {
 			var out bytes.Buffer
+			ioEnv := core.IO{Stdout: &out, Stderr: io.Discard}
 
-			err := run(&out, tt.flags)
+			err := run(context.Background(), ioEnv, tt.flags...)
 			if !errors.Is(err, tt.err) {
 				t.Fatalf("got %v want %v", err, tt.err)
 			}

@@ -2,81 +2,110 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Run a command, repeatedly, until it succeeds or we are out of time
+// Package backoff runs a command, repeatedly, until it succeeds or we are out of time.
 //
 // Synopsis:
+//
 //	backoff [-v] [-t duration-string] command [args...]
 //
 // Description:
+//
 //	backoff will run the command until it succeeds or a timeout has passed.
 //	The default timeout is 30s.
-//	If -v is set, it will show what it is running, each time it is tried.
-//	If no args are given, it will print command help.
-//
-// Example:
-//	$ backoff echo hi
-//	hi
-//	$
-//	$ backoff -v -t=2s false
-//	  2022/03/31 14:29:37 Run ["false"]
-//	  2022/03/31 14:29:37 Set timeout to 2s
-//	  2022/03/31 14:29:37 "false" []:exit status 1
-//	  2022/03/31 14:29:38 "false" []:exit status 1
-//	  2022/03/31 14:29:39 "false" []:exit status 1
-//	  2022/03/31 14:29:39 Error: exit status 1
-
-//go:build !test
-
-package main
+package backoff
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
-	"os"
 	"os/exec"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
+	cenkaltibackoff "github.com/cenkalti/backoff/v4"
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-var (
-	timeout = flag.Duration("t", 30*time.Second, "Timeout for command")
-	verbose = flag.Bool("v", false, "Log each attempt to run the command")
-	v       = func(string, ...any) {}
+var errNoCmd = errors.New("no command passed")
 
-	errNoCmd = fmt.Errorf("no command passed")
-)
-
-func run(timeout time.Duration, c string, a ...string) error {
-	if c == "" {
+func run(ctx context.Context, ioEnv core.IO, timeoutVal time.Duration, verbose bool, cmdArgs ...string) error {
+	if len(cmdArgs) == 0 || cmdArgs[0] == "" {
 		return errNoCmd
 	}
-	b := backoff.NewExponentialBackOff()
-	b.MaxElapsedTime = timeout
+
+	b := cenkaltibackoff.NewExponentialBackOff()
+	b.MaxElapsedTime = timeoutVal
+	bCtx := cenkaltibackoff.WithContext(b, ctx)
+
 	f := func() error {
-		cmd := exec.Command(c, a...)
-		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		select {
+		case <-ctx.Done():
+			return cenkaltibackoff.Permanent(ctx.Err())
+		default:
+		}
+
+		if ioEnv.Runner != nil {
+			code := ioEnv.Runner(ctx, ioEnv, cmdArgs...)
+			if code != 0 {
+				err := fmt.Errorf("command %s exited with status %d", cmdArgs[0], code)
+				if verbose {
+					fmt.Fprintf(ioEnv.Stderr, "%q %v: %v\n", cmdArgs[0], cmdArgs[1:], err)
+				}
+				return err
+			}
+			return nil
+		}
+
+		cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
+		cmd.Stdin = ioEnv.Stdin
+		cmd.Stdout = ioEnv.Stdout
+		cmd.Stderr = ioEnv.Stderr
 		err := cmd.Run()
-		v("%q %q:%v", c, a, err)
+		if verbose {
+			fmt.Fprintf(ioEnv.Stderr, "%q %v: %v\n", cmdArgs[0], cmdArgs[1:], err)
+		}
 		return err
 	}
 
-	return backoff.Retry(f, b)
+	return cenkaltibackoff.Retry(f, bCtx)
 }
 
-func main() {
-	flag.Parse()
-	if *verbose {
-		v = log.Printf
+// Main runs the backoff command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "backoff: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var timeoutVal time.Duration
+	var verbose bool
+	fs := flag.NewFlagSet("backoff", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.DurationVar(&timeoutVal, "t", 30*time.Second, "Timeout for command")
+	fs.BoolVar(&verbose, "v", false, "Log each attempt to run the command")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "backoff: %v\n", err)
+		}
+		return 1
 	}
-	a := flag.Args()
-	if len(a) == 0 {
-		flag.Usage()
-		os.Exit(1)
+
+	cmdArgs := fs.Args()
+	if len(cmdArgs) == 0 {
+		fs.Usage()
+		return 1
 	}
-	v("Run %q", a)
-	if err := run(*timeout, a[0], a[1:]...); err != nil {
-		log.Fatalf("Error: %v", err)
+
+	if err := run(ctx, ioEnv, timeoutVal, verbose, cmdArgs...); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "backoff: %v\n", err)
+		return 1
 	}
+	return 0
 }

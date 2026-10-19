@@ -8,17 +8,17 @@
 // Synopsis:
 //
 //	echo [-e] [-n] [-E] [STRING]...
-package main
+package echo
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"strings"
 
-	"github.com/u-root/u-root/pkg/uroot/util"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 var usage = `echo:
@@ -35,27 +35,79 @@ var usage = `echo:
     \0NNN  byte with octal value NNN (1 to 3 digits)
     \xHH   byte with hexadecimal value HH (1 to 2 digits)`
 
-var (
-	noNewline                 = flag.Bool("n", false, "suppress newline")
-	interpretEscapes          = flag.Bool("e", true, "enable interpretation of backslash escapes (default)")
-	interpretBackslashEscapes = flag.Bool("E", false, "disable interpretation of backslash escapes")
-)
-
 func escapeString(s string) (string, error) {
 	if len(s) < 1 {
 		return "", nil
 	}
 
 	s = strings.Split(s, "\\c")[0]
-	s = strings.ReplaceAll(s, "\\0", "\\")
 
-	// Quote the string and scan it through %q to interpret backslash escapes
-	s = fmt.Sprintf("\"%s\"", s)
-	_, err := fmt.Sscanf(s, "%q", &s)
-	if err != nil {
-		return "", err
+	var buf strings.Builder
+	buf.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			buf.WriteByte(s[i])
+			continue
+		}
+		i++
+		switch s[i] {
+		case '\\':
+			buf.WriteByte('\\')
+		case 'a':
+			buf.WriteByte('\a')
+		case 'b':
+			buf.WriteByte('\b')
+		case 'f':
+			buf.WriteByte('\f')
+		case 'n':
+			buf.WriteByte('\n')
+		case 'r':
+			buf.WriteByte('\r')
+		case 't':
+			buf.WriteByte('\t')
+		case 'v':
+			buf.WriteByte('\v')
+		case '0':
+			var val byte
+			digits := 0
+			for digits < 3 && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '7' {
+				i++
+				val = val*8 + (s[i] - '0')
+				digits++
+			}
+			buf.WriteByte(val)
+		case 'x':
+			var val byte
+			digits := 0
+			for digits < 2 && i+1 < len(s) {
+				c := s[i+1]
+				if c >= '0' && c <= '9' {
+					i++
+					val = val*16 + (c - '0')
+					digits++
+				} else if c >= 'a' && c <= 'f' {
+					i++
+					val = val*16 + (c - 'a' + 10)
+					digits++
+				} else if c >= 'A' && c <= 'F' {
+					i++
+					val = val*16 + (c - 'A' + 10)
+					digits++
+				} else {
+					break
+				}
+			}
+			if digits > 0 {
+				buf.WriteByte(val)
+			} else {
+				buf.WriteString("\\x")
+			}
+		default:
+			buf.WriteByte('\\')
+			buf.WriteByte(s[i])
+		}
 	}
-	return s, nil
+	return buf.String(), nil
 }
 
 func echo(w io.Writer, noNewline, escape, backslash bool, s ...string) error {
@@ -79,13 +131,48 @@ func echo(w io.Writer, noNewline, escape, backslash bool, s ...string) error {
 	return err
 }
 
-func init() {
-	flag.Usage = util.Usage(flag.Usage, usage)
-}
+// Main executes the echo command with the given execution context.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "echo: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
 
-func main() {
-	flag.Parse()
-	if err := echo(os.Stdout, *noNewline, *interpretEscapes, *interpretBackslashEscapes, flag.Args()...); err != nil {
-		log.Fatalf("%v", err)
+	var (
+		noNewline                 bool
+		interpretEscapes          bool
+		interpretBackslashEscapes bool
+	)
+
+	fs := flag.NewFlagSet("echo", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&noNewline, "n", false, "suppress newline")
+	fs.BoolVar(&interpretEscapes, "e", true, "enable interpretation of backslash escapes (default)")
+	fs.BoolVar(&interpretBackslashEscapes, "E", false, "disable interpretation of backslash escapes")
+
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: echo [-e] [-n] [-E] [STRING]...\n\n%s\n\nOptions:\n", usage)
+		fs.PrintDefaults()
 	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+
+	select {
+	case <-ctx.Done():
+		return 130
+	default:
+	}
+
+	if err := echo(ioEnv.Stdout, noNewline, interpretEscapes, interpretBackslashEscapes, fs.Args()...); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "echo: %v\n", err)
+		return 1
+	}
+	return 0
 }

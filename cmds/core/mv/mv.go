@@ -12,18 +12,19 @@
 // Author:
 //
 //	Beletti (rhiguita@gmail.com)
-package main
+package mv
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"syscall"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
@@ -66,7 +67,7 @@ func moveFile(source string, dest string, update bool, noClobber bool) error {
 	return os.Rename(source, dest)
 }
 
-func mv(files []string, update, noClobber, todir bool) error {
+func mvWithCtx(ctx context.Context, files []string, update, noClobber, todir bool) error {
 	if len(files) == 2 && !todir {
 		// Rename/move a single file
 		if err := moveFile(files[0], files[1], update, noClobber); err != nil {
@@ -76,6 +77,11 @@ func mv(files []string, update, noClobber, todir bool) error {
 		// Move one or more files into a directory
 		destdir := files[len(files)-1]
 		for _, f := range files[:len(files)-1] {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			newPath := filepath.Join(destdir, filepath.Base(f))
 			if err := moveFile(f, newPath, update, noClobber); err != nil {
 				return err
@@ -85,7 +91,11 @@ func mv(files []string, update, noClobber, todir bool) error {
 	return nil
 }
 
-func move(stderr io.Writer, args []string) error {
+func mv(files []string, update, noClobber, todir bool) error {
+	return mvWithCtx(context.Background(), files, update, noClobber, todir)
+}
+
+func moveWithCtx(ctx context.Context, stderr io.Writer, args []string, resolvePath func(string) string) error {
 	var f flags
 
 	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
@@ -100,6 +110,9 @@ func move(stderr io.Writer, args []string) error {
 	}
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 
@@ -112,8 +125,12 @@ func move(stderr io.Writer, args []string) error {
 
 	var todir bool
 	dest := files[len(files)-1]
+	resolvedDest := dest
+	if resolvePath != nil {
+		resolvedDest = resolvePath(dest)
+	}
 
-	if destdir, err := os.Lstat(dest); err == nil {
+	if destdir, err := os.Lstat(resolvedDest); err == nil {
 		todir = destdir.IsDir()
 	}
 
@@ -121,11 +138,34 @@ func move(stderr io.Writer, args []string) error {
 		return fmt.Errorf("%s: %w", dest, syscall.ENOTDIR)
 	}
 
-	return mv(files, f.update, f.noClobber, todir)
+	resolvedFiles := make([]string, len(files))
+	for i, file := range files {
+		if resolvePath != nil {
+			resolvedFiles[i] = resolvePath(file)
+		} else {
+			resolvedFiles[i] = file
+		}
+	}
+
+	return mvWithCtx(ctx, resolvedFiles, f.update, f.noClobber, todir)
 }
 
-func main() {
-	if err := move(os.Stderr, os.Args[1:]); err != nil {
-		log.Fatal(err)
+func move(stderr io.Writer, args []string) error {
+	return moveWithCtx(context.Background(), stderr, args, nil)
+}
+
+// Main runs mv reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "mv panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := moveWithCtx(ctx, ioEnv.Stderr, args, ioEnv.ResolvePath); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "mv: %v\n", err)
+		return 1
 	}
+	return 0
 }

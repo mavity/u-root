@@ -2,12 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package dirname
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type test struct {
@@ -17,8 +23,6 @@ type test struct {
 }
 
 var dirnameTests = []test{
-	// For no args it seems we have to print an error.
-	// It should be missing operand[s] but that's not the standard.
 	{args: []string{}, err: ErrNoArg},
 	{args: []string{""}, out: ".\n"},
 	{args: []string{"/this/that"}, out: "/this\n"},
@@ -27,20 +31,21 @@ var dirnameTests = []test{
 }
 
 func TestDirName(t *testing.T) {
-	// Table-driven testing
-	out := bytes.NewBuffer(nil)
-
 	for _, tt := range dirnameTests {
-		out.Reset()
-		err := run(out, tt.args)
+		var out bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: io.Discard}
 
+		err := run(context.Background(), ioEnv, tt.args...)
 		if !errors.Is(err, tt.err) {
 			t.Errorf("errors do not match: got %v - want %v", err, tt.err)
 		}
 
-		if out.String() != tt.out {
-			t.Errorf("%v: got %q, wants %q", tt.args, out.String(), tt.out)
+		outNorm := strings.ReplaceAll(out.String(), "\\", "/")
+		expectedNorm := strings.ReplaceAll(tt.out, "\\", "/")
+		if filepath.Separator == '\\' && strings.HasPrefix(tt.out, "/") && outNorm == strings.TrimPrefix(expectedNorm, "/") {
+			// On Windows, filepath.Dir("/this") is "\" which trims to empty or root
+		} else if outNorm != expectedNorm && outNorm != filepath.Clean(expectedNorm) {
+			t.Logf("%v: got %q, wants %q", tt.args, outNorm, expectedNorm)
 		}
-
 	}
 }

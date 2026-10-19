@@ -55,16 +55,20 @@
 //	- c is anywhere
 //	- h is anywhere
 
-package main
+package tsort
 
 import (
 	"bufio"
+	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"slices"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 var (
@@ -72,18 +76,63 @@ var (
 	errOddDataCount = errors.New("odd data count")
 )
 
+// Main runs the tsort command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "tsort panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	fs := flag.NewFlagSet("tsort", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+
+	rest := fs.Args()
+	resolvedArgs := make([]string, len(rest))
+	for i, a := range rest {
+		if a != "-" {
+			resolvedArgs[i] = ioEnv.ResolvePath(a)
+		} else {
+			resolvedArgs[i] = a
+		}
+	}
+
+	err := runWithCtx(ctx, ioEnv.Stdin, ioEnv.Stdout, ioEnv.Stderr, resolvedArgs...)
+	if errors.Is(err, errNonFatal) {
+		return 1
+	}
+	if err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "tsort: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
 func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	return runWithCtx(context.Background(), stdin, stdout, stderr, args...)
+}
+
+func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	var err error
 	in := io.NopCloser(stdin)
-	if len(args) >= 1 {
-		if in, err = os.Open(args[0]); err != nil {
-			return err
+	if len(args) >= 1 && args[0] != "-" {
+		f, openErr := os.Open(args[0])
+		if openErr != nil {
+			return openErr
 		}
+		in = f
 	}
 	defer in.Close()
 
 	g := newGraph()
-	if err = parseInto(in, g); err != nil {
+	if err = parseInto(ctx, in, g); err != nil {
 		return err
 	}
 
@@ -102,11 +151,16 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	return err
 }
 
-func parseInto(in io.Reader, g *graph) error {
+func parseInto(ctx context.Context, in io.Reader, g *graph) error {
 	scanner := bufio.NewScanner(in)
 	scanner.Split(bufio.ScanWords)
 
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		a := scanner.Text()
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
@@ -182,16 +236,5 @@ func topologicalOrdering(
 
 	for _, node := range slices.Backward(result) {
 		f(node)
-	}
-}
-
-func main() {
-	err := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]...)
-	if errors.Is(err, errNonFatal) {
-		// All non-fatal warnings have been printed already, so just exit.
-		os.Exit(1)
-	}
-	if err != nil {
-		log.Fatalf("tsort: %v", err)
 	}
 }

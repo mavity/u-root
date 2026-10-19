@@ -2,57 +2,62 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9 && !windows
-
-package main
+// tty prints the file name of the terminal connected to standard input.
+//
+// Synopsis:
+//
+//	tty [-s]
+package tty
 
 import (
+	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
-	"path/filepath"
-	"syscall"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-func run(stdout io.Writer) error {
-	fi, err := os.Stdin.Stat()
+func run(stdout io.Writer, stdin io.Reader, silent bool) error {
+	path, err := findTTY(stdin)
 	if err != nil {
+		if !silent {
+			fmt.Fprintln(stdout, "not a tty")
+		}
 		return err
 	}
-
-	s, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		return fmt.Errorf("stat stdin:Sys() is empty: %w", os.ErrNotExist)
+	if !silent {
+		fmt.Fprintln(stdout, path)
 	}
-
-	return filepath.WalkDir("/dev", func(path string, dir os.DirEntry, _ error) error {
-		switch path {
-		case "/dev/fd":
-			// On some systems, /dev/fd is a directory. On Linux, /dev/fd is a symlink.
-			// If /dev/fd is a directory, it should not be walked, so return file path.SkipDir.
-			if dir.IsDir() {
-				return filepath.SkipDir
-			}
-		case "/dev/stdin", "/dev/stdout", "/dev/stderr":
-			return nil
-		}
-		if fi, err := os.Stat(path); err == nil {
-			stat, ok := fi.Sys().(*syscall.Stat_t)
-			if ok {
-				if stat.Ino == s.Ino && stat.Dev == s.Dev {
-					fmt.Fprintln(stdout, path)
-				}
-			}
-
-		}
-
-		return nil
-	})
+	return nil
 }
 
-func main() {
-	if err := run(os.Stdin); err != nil {
-		log.Fatal(err)
+// Main runs the tty command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "tty: panic: %v\n", r)
+			exitCode = 3
+		}
+	}()
+
+	fs := flag.NewFlagSet("tty", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	silent := fs.Bool("s", false, "print nothing, only return an exit status")
+	fs.BoolVar(silent, "silent", false, "print nothing, only return an exit status")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
+
+	if err := run(ioEnv.Stdout, ioEnv.Stdin, *silent); err != nil {
+		return 1
+	}
+	return 0
 }

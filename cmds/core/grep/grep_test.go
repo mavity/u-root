@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package grep
 
 import (
 	"bufio"
@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 // GrepTest is a table-driven which spawns grep with a variety of options and inputs.
@@ -173,6 +175,14 @@ func TestStdinGrep(t *testing.T) {
 }
 
 func TestFilesGrep(t *testing.T) {
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.Chdir(origDir)
+	}()
+
 	tmpDir := t.TempDir()
 	f1, err := os.CreateTemp(tmpDir, "f1")
 	if err != nil {
@@ -188,16 +198,19 @@ func TestFilesGrep(t *testing.T) {
 	}
 
 	_, err = f1.WriteString("hix\nnix\n")
+	_ = f1.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	_, err = f2.WriteString("hix\nhello\n")
+	_ = f2.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	_, err = f3.WriteString("hix\ngoodbye\n")
+	_ = f3.Close()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,5 +305,31 @@ func TestDefaultParams(t *testing.T) {
 	res := stdout.String()
 	if res != "hix\n" {
 		t.Errorf("got out %q, want %q", res, "hix\n")
+	}
+}
+
+func TestGrepMain(t *testing.T) {
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{
+		Stdin:  strings.NewReader("apple\nbanana\napricot\n"),
+		Stdout: &out,
+		Stderr: &errOut,
+	}
+	code := Main(t.Context(), ioEnv, "^a")
+	if code != 0 {
+		t.Fatalf("Main returned %d, err: %s", code, errOut.String())
+	}
+	want := "apple\napricot\n"
+	if out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
+	}
+
+	// Test no match returns exit code 1
+	out.Reset()
+	errOut.Reset()
+	ioEnv.Stdin = strings.NewReader("apple\nbanana\n")
+	code = Main(t.Context(), ioEnv, "^z")
+	if code != 1 {
+		t.Fatalf("expected code 1 on no match, got %d", code)
 	}
 }

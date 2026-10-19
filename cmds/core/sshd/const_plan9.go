@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !tinygo || tinygo.enable
+//go:build plan9
 
-package main
+package sshd
 
-var shell = "/bin/rc"
+var (
+	defaultShell     = "/bin/rc"
+	defaultShellFlag = "-c"
+)

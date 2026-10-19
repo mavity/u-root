@@ -4,10 +4,12 @@
 //go:build !tinygo || tinygo.enable
 
 // ip manipulates network addresses, interfaces, routing, and other config.
-package main
+package ip
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -93,7 +96,8 @@ func parseFlags(args []string, out io.Writer) (cmd, error) {
 		Out: out,
 	}
 
-	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
+	fs := flag.NewFlagSet("ip", flag.ContinueOnError)
+	fs.SetOutput(out)
 	fs.StringVar(&cmd.Opts.Family, "f", "", "Specify family (inet, inet6, mpls, link)")
 	fs.StringVar(&cmd.Opts.Family, "family", "", "Specify family (inet, inet6, mpls, link)")
 	fs.BoolVar(&cmd.Opts.Resolve, "r", false, "Use system resolver to display DNS names")
@@ -144,7 +148,9 @@ func parseFlags(args []string, out io.Writer) (cmd, error) {
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(unixflag.ArgsToGoArgs(args[1:]))
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args[1:])); err != nil {
+		return cmd, err
+	}
 	cmd.Args = fs.Args()
 
 	cmd.Family = netlink.FAMILY_ALL
@@ -334,14 +340,27 @@ func (cmd *cmd) runSubCommand() error {
 	}
 }
 
-func main() {
-	cmd, err := parseFlags(os.Args, os.Stdout)
+// Main is the reentrant entry point for ip on Linux.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "ip: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	cmd, err := parseFlags(append([]string{"ip"}, args...), ioEnv.Stdout)
 	if err != nil {
-		log.Fatalf("ip: %v", err)
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(ioEnv.Stderr, "ip: %v\n", err)
+		return 1
 	}
 
-	err = cmd.run()
-	if err != nil {
-		log.Fatalf("ip: %v", err)
+	if err := cmd.run(); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "ip: %v\n", err)
+		return 1
 	}
+	return 0
 }

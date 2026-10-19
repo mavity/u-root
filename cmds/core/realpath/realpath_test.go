@@ -2,15 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package realpath
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestRealpath(t *testing.T) {
@@ -24,6 +28,7 @@ func TestRealpath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	_ = f.Close()
 
 	err = os.Symlink(f.Name(), filepath.Join(dir, "symlink"))
 	if err != nil {
@@ -55,15 +60,17 @@ func TestRealpath(t *testing.T) {
 
 	for _, test := range tests {
 		stdout := &bytes.Buffer{}
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard, Dir: dir}
 
-		err := run(stdout, test.args...)
-		fmt.Println(test.args)
+		err := run(context.Background(), ioEnv, test.args...)
 		if !errors.Is(err, test.expectedErr) {
-			t.Fatalf("expected %v, got %v", test.expectedErr, err)
+			t.Fatalf("args %v: expected %v, got %v", test.args, test.expectedErr, err)
 		}
 
-		if stdout.String() != test.expectedOutput {
-			t.Errorf("expected %v, got %v", test.expectedOutput, stdout.String())
+		outNorm := strings.ReplaceAll(stdout.String(), "\\", "/")
+		expectedNorm := strings.ReplaceAll(test.expectedOutput, "\\", "/")
+		if outNorm != expectedNorm {
+			t.Errorf("args %v: expected %v, got %v", test.args, expectedNorm, outNorm)
 		}
 	}
 }

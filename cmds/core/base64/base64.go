@@ -13,17 +13,19 @@
 //	Encode or decode a file to or from base64 encoding.
 //	-d   decode data (default is to encode)
 //	For stdin, on standard Unix systems, you can use /dev/stdin
-package main
+package base64cmd
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
@@ -41,21 +43,35 @@ type params struct {
 
 var errBadUsage = errors.New("usage: base64 [-d] [file]")
 
-func decodeone(stdin io.Reader, stdout io.Writer) error {
-	r := base64.NewDecoder(base64.StdEncoding, stdin)
+type cancelReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c cancelReader) Read(p []byte) (int, error) {
+	select {
+	case <-c.ctx.Done():
+		return 0, c.ctx.Err()
+	default:
+		return c.r.Read(p)
+	}
+}
+
+func decodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+	r := base64.NewDecoder(base64.StdEncoding, cancelReader{ctx: ctx, r: stdin})
 	if _, err := io.Copy(stdout, r); err != nil {
 		return fmt.Errorf("decoding: %w", err)
 	}
 	return nil
 }
 
-func encodeone(stdin io.Reader, stdout io.Writer) error {
+func encodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	// WriteCloser is important here, from NewEncoder documentation:
 	// when finished writing, the caller must Close the returned encoder
 	// to flush any partially written blocks.
 	wc := base64.NewEncoder(base64.StdEncoding, stdout)
 	defer wc.Close()
-	if _, err := io.Copy(wc, stdin); err != nil {
+	if _, err := io.Copy(wc, cancelReader{ctx: ctx, r: stdin}); err != nil {
 		return fmt.Errorf("error encoding: %w", err)
 	}
 	if err := wc.Close(); err != nil { // flush any remaining data
@@ -67,41 +83,69 @@ func encodeone(stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, resolvePath func(string) string, args ...string) error {
 	c := cmd{
 		stdin:  stdin,
 		stdout: stdout,
 		stderr: stderr,
 	}
 
-	f := flag.NewFlagSet("base64", flag.ExitOnError)
+	f := flag.NewFlagSet("base64", flag.ContinueOnError)
+	f.SetOutput(stderr)
 	f.BoolVar(&c.decode, "d", false, "decode or encode the file")
 
-	// ignore error as flag.ExitOnError to not to print it twice
-	_ = f.Parse(unixflag.ArgsToGoArgs(args))
+	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
 	c.args = f.Args()
 
 	switch {
 	case len(c.args) > 1:
-		return fmt.Errorf("only 0 or 1 arg allowed:%w", errBadUsage)
+		return fmt.Errorf("only 0 or 1 arg allowed: %w", errBadUsage)
 	case len(c.args) == 0:
 	case c.args[0] == "-":
 	default:
-		stdin, err := os.Open(c.args[0])
+		p := c.args[0]
+		if resolvePath != nil {
+			p = resolvePath(p)
+		}
+		f, err := os.Open(p)
 		if err != nil {
 			return err
 		}
-		c.stdin = stdin
+		defer f.Close()
+		c.stdin = f
+	}
+
+	if c.stdin == nil {
+		c.stdin = bytes.NewReader(nil)
 	}
 
 	if c.decode {
-		return decodeone(c.stdin, c.stdout)
+		return decodeone(ctx, c.stdin, c.stdout)
 	}
-	return encodeone(c.stdin, c.stdout)
+	return encodeone(ctx, c.stdin, c.stdout)
 }
 
-func main() {
-	if err := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:]...); err != nil {
-		log.Fatalf("%s: %v", os.Args[0], err)
+func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
+	return runWithCtx(context.Background(), stdin, stdout, stderr, nil, args...)
+}
+
+// Main executes base64 reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "base64 panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := runWithCtx(ctx, ioEnv.Stdin, ioEnv.Stdout, ioEnv.Stderr, ioEnv.ResolvePath, args...); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "base64: %v\n", err)
+		return 1
 	}
+	return 0
 }

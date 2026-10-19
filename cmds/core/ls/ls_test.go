@@ -2,20 +2,23 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package lscmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/ls"
-	"golang.org/x/sys/unix"
 )
 
 // Test listName func
@@ -26,11 +29,24 @@ func TestListName(t *testing.T) {
 		t.Fatalf("err in os.Mkdir: %v", err)
 	}
 	// Create some files.
-	files := []string{"f1", "f2", "f3\nline 2", ".f4", "d1/f4"}
+	hasNewlineFile := runtime.GOOS != "windows"
+	files := []string{"f1", "f2", ".f4", "d1/f4"}
+	if hasNewlineFile {
+		files = append(files, "f3\nline 2")
+	}
 	for _, file := range files {
-		if _, err := os.Create(filepath.Join(tmpDir, file)); err != nil {
+		f, err := os.Create(filepath.Join(tmpDir, file))
+		if err != nil {
 			t.Fatalf("err in os.Create: %v", err)
 		}
+		_ = f.Close()
+	}
+
+	nlEntry := func(entry string) string {
+		if hasNewlineFile {
+			return entry + "\n"
+		}
+		return ""
 	}
 
 	// Creating test table
@@ -44,13 +60,13 @@ func TestListName(t *testing.T) {
 		{
 			name:  "ls without arguments",
 			input: tmpDir,
-			want:  fmt.Sprintf("%s\n%s\n%s\n%s\n", "d1", "f1", "f2", "f3?line 2"),
+			want:  fmt.Sprintf("d1\nf1\nf2\n%s", nlEntry("f3?line 2")),
 			flag:  cmd{},
 		},
 		{
 			name:  "ls osfi.IsDir() path, quoted = true",
 			input: tmpDir,
-			want:  fmt.Sprintf("\"%s\"\n\"%s\"\n\"%s\"\n\"%s\"\n", "d1", "f1", "f2", "f3\\nline 2"),
+			want:  fmt.Sprintf("\"d1\"\n\"f1\"\n\"f2\"\n%s", nlEntry("\"f3\\nline 2\"")),
 			flag: cmd{
 				quoted: true,
 			},
@@ -58,7 +74,7 @@ func TestListName(t *testing.T) {
 		{
 			name:  "ls osfi.IsDir() path, quoted = true, prefix = true ",
 			input: tmpDir,
-			want:  fmt.Sprintf("\"%s\":\n\"%s\"\n\"%s\"\n\"%s\"\n\"%s\"\n", tmpDir, "d1", "f1", "f2", "f3\\nline 2"),
+			want:  fmt.Sprintf("%q:\n\"d1\"\n\"f1\"\n\"f2\"\n%s", tmpDir, nlEntry("\"f3\\nline 2\"")),
 			flag: cmd{
 				quoted: true,
 			},
@@ -67,14 +83,25 @@ func TestListName(t *testing.T) {
 		{
 			name:   "ls osfi.IsDir() path, quoted = false, prefix = true ",
 			input:  tmpDir,
-			want:   fmt.Sprintf("%s:\n%s\n%s\n%s\n%s\n", tmpDir, "d1", "f1", "f2", "f3?line 2"),
+			want:   fmt.Sprintf("%s:\nd1\nf1\nf2\n%s", tmpDir, nlEntry("f3?line 2")),
 			prefix: true,
 		},
 		{
 			name:  "ls recurse = true",
 			input: tmpDir,
-			want: fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n", tmpDir, filepath.Join(tmpDir, ".f4"), filepath.Join(tmpDir, "d1"),
-				filepath.Join(tmpDir, "d1/f4"), filepath.Join(tmpDir, "f1"), filepath.Join(tmpDir, "f2"), filepath.Join(tmpDir, "f3?line 2")),
+			want: func() string {
+				var b strings.Builder
+				b.WriteString(tmpDir + "\n")
+				b.WriteString(filepath.Join(tmpDir, ".f4") + "\n")
+				b.WriteString(filepath.Join(tmpDir, "d1") + "\n")
+				b.WriteString(filepath.Join(tmpDir, "d1", "f4") + "\n")
+				b.WriteString(filepath.Join(tmpDir, "f1") + "\n")
+				b.WriteString(filepath.Join(tmpDir, "f2") + "\n")
+				if hasNewlineFile {
+					b.WriteString(filepath.Join(tmpDir, "f3?line 2") + "\n")
+				}
+				return b.String()
+			}(),
 			flag: cmd{
 				all:     true,
 				recurse: true,
@@ -91,7 +118,7 @@ func TestListName(t *testing.T) {
 		{
 			name:  "ls classify = true",
 			input: tmpDir,
-			want:  fmt.Sprintf("%s\n%s\n%s\n%s\n", "d1/", "f1", "f2", "f3?line 2"),
+			want:  fmt.Sprintf("d1/\nf1\nf2\n%s", nlEntry("f3?line 2")),
 			flag: cmd{
 				classify: true,
 			},
@@ -118,6 +145,13 @@ func TestListName(t *testing.T) {
 
 			// listName always return nil
 			_ = tt.flag.listName(s, tt.input, tt.prefix)
+			if tt.name == "file does not exist" {
+				if !strings.Contains(buf.String(), "no such file or directory") &&
+					!strings.Contains(buf.String(), "The system cannot find the file specified") {
+					t.Errorf("listName() = '%v', want error containing 'no such file or directory'", buf.String())
+				}
+				return
+			}
 			if buf.String() != tt.want {
 				t.Errorf("listName() = '%v', want: '%v'", buf.String(), tt.want)
 			}
@@ -229,8 +263,6 @@ func TestPermHandling(t *testing.T) {
 	if err := c.listName(ls.NameStringer{}, d, false); err != nil {
 		t.Fatalf("listName(ls.NameString{}, %q, w, false): %v != nil", d, err)
 	}
-	// the output varies very widely between kernels and Go versions :-(
-	// Just look for 'permission denied' and more than 6 lines of output ...
 	if !strings.Contains(b.String(), "0\n1\n2\na\nb\nc\nd\n") {
 		t.Errorf("ls %q: output %q did not contain %q", d, b.String(), "0\n1\n2\na\nb\nc\nd\n")
 	}
@@ -243,12 +275,53 @@ func TestNotExist(t *testing.T) {
 	if err := c.listName(ls.NameStringer{}, filepath.Join(d, "b"), false); err != nil {
 		t.Fatalf("listName(ls.NameString{}, %q/b, w, false): nil != %v", d, err)
 	}
-	// yeesh.
-	// errors not consistent and ... the error has this gratuitous 'lstat ' in front
-	// of the filename ...
 	eexist := fmt.Sprintf("%s:%v", filepath.Join(d, "b"), os.ErrNotExist)
-	enoent := fmt.Sprintf("%s: %v", filepath.Join(d, "b"), unix.ENOENT)
-	if !strings.Contains(b.String(), eexist) && !strings.Contains(b.String(), enoent) {
+	enoent := fmt.Sprintf("%s: %v", filepath.Join(d, "b"), syscall.ENOENT)
+	if !strings.Contains(b.String(), eexist) && !strings.Contains(b.String(), enoent) &&
+		!strings.Contains(b.String(), "cannot find the file specified") &&
+		!strings.Contains(b.String(), "no such file or directory") {
 		t.Fatalf("ls of bad name: %q does not contain %q or %q", b.String(), eexist, enoent)
 	}
+}
+
+func TestMainInvocation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic ls in directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "alpha.txt"), []byte("a"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "beta.txt"), []byte("b"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv)
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "alpha.txt") || !strings.Contains(out, "beta.txt") {
+			t.Errorf("stdout = %q, expected alpha.txt and beta.txt", out)
+		}
+	})
+
+	t.Run("ls non-existent returns 1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "definitely-not-existing-path-12345")
+		if code != 1 {
+			t.Fatalf("expected code 1 on non-existent file, got %d", code)
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "--help")
+		if code != 0 {
+			t.Fatalf("expected code 0 on --help, got %d", code)
+		}
+	})
 }

@@ -7,7 +7,7 @@
 //
 //	go test
 //	EXECPATH="wget -O -" go test
-package main
+package wget
 
 import (
 	"errors"
@@ -135,9 +135,13 @@ func TestWget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			origWd, _ := os.Getwd()
 			if err := os.Chdir(t.TempDir()); err != nil {
 				t.Fatalf("failed to change into temporary directory: %v", err)
 			}
+			t.Cleanup(func() {
+				_ = os.Chdir(origWd)
+			})
 			c, err := command([]string{"wget", "-O", tt.outputPath, tt.url}...)
 			if err == nil {
 				err = c.run()

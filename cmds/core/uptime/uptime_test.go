@@ -1,17 +1,20 @@
-// Copyright 2019-2021 the u-root Authors. All rights reserved
+// Copyright 2019-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package uptime
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestUptime(t *testing.T) {
@@ -167,6 +170,36 @@ func TestRun(t *testing.T) {
 
 		if !strings.Contains(stdout.String(), "0.08, 0.09, 0.10") {
 			t.Error("expected to see load averages")
+		}
+	})
+}
+
+func TestMain(t *testing.T) {
+	t.Run("default uptime", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr})
+		if code != 0 {
+			t.Fatalf("uptime failed: %d, stderr=%s", code, stderr.String())
+		}
+		out := stdout.String()
+		if !strings.Contains(out, "up") || !strings.Contains(out, "loadaverage:") {
+			t.Errorf("uptime output missing expected tokens: %q", out)
+		}
+	})
+
+	t.Run("flag -help", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-help")
+		if code != 0 {
+			t.Fatalf("uptime -help expected 0, got %d", code)
+		}
+	})
+
+	t.Run("invalid flag", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &stdout, Stderr: &stderr}, "-invalidxyz")
+		if code != 1 {
+			t.Fatalf("uptime -invalidxyz expected 1, got %d", code)
 		}
 	})
 }

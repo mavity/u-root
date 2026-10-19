@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package wc
 
 import (
 	"bytes"
@@ -19,10 +19,12 @@ func TestFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f1.Close()
 	f2, err := os.CreateTemp(tmpDir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f2.Close()
 	_, err = f1.Write([]byte("simple test count words\nlines\nlines\n"))
 	if err != nil {
 		t.Fatal(err)

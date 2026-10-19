@@ -2,16 +2,20 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package mktemp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type test struct {
@@ -24,37 +28,37 @@ func TestMkTemp(t *testing.T) {
 	tmpDir := os.TempDir()
 	tests := []test{
 		{
-			cmdline: []string{"mktemp"},
+			cmdline: []string{},
 			out:     tmpDir,
 			err:     nil,
 		},
 		{
-			cmdline: []string{"mktemp", "-d"},
+			cmdline: []string{"-d"},
 			out:     tmpDir,
 			err:     nil,
 		},
 		{
-			cmdline: []string{"mktemp", "foofoo.XXXX"},
+			cmdline: []string{"foofoo.XXXX"},
 			out:     filepath.Join(tmpDir, "foofoo"),
 			err:     nil,
 		},
 		{
-			cmdline: []string{"mktemp", "--suffix", "baz", "foo.XXXX"},
+			cmdline: []string{"--suffix", "baz", "foo.XXXX"},
 			out:     filepath.Join(tmpDir, "foo.baz"),
 			err:     nil,
 		},
 		{
-			cmdline: []string{"mktemp", "-u"},
+			cmdline: []string{"-u"},
 			out:     "",
 			err:     nil,
 		},
 		{
-			cmdline: []string{"mktemp", "-p", "/notexists"},
+			cmdline: []string{"-p", "/notexists"},
 			out:     "",
 			err:     os.ErrNotExist,
 		},
 		{
-			cmdline: []string{"mktemp", "-q", "-p", "/notexists"},
+			cmdline: []string{"-q", "-p", "/notexists"},
 			out:     "",
 		},
 	}
@@ -62,8 +66,8 @@ func TestMkTemp(t *testing.T) {
 	// Table-driven testing
 	for _, tt := range tests {
 		var stdout bytes.Buffer
-		cmd := command(&stdout, tt.cmdline)
-		err := cmd.run()
+		ioEnv := core.IO{Stdout: &stdout, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, tt.cmdline...)
 		if !errors.Is(err, tt.err) {
 			t.Errorf("expected %v, got %v", tt.err, err)
 		}
@@ -77,7 +81,8 @@ func TestMkTemp(t *testing.T) {
 
 func TestDefaultFlags(t *testing.T) {
 	f := flags{}
-	f.register(flag.CommandLine)
+	fs := flag.NewFlagSet("test", flag.ContinueOnError)
+	f.register(fs)
 
 	if f.d {
 		t.Error("directory should be false by default")

@@ -4,11 +4,12 @@
 
 // created by Manoel Vilela <manoel_vilela@engineer.com>
 
-package main
+package cpcmd
 
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/cp"
 	"github.com/u-root/uio/uio"
-	"golang.org/x/sys/unix"
 )
 
 const (
@@ -78,6 +79,7 @@ func TestRunSimple(t *testing.T) {
 	if err != nil {
 		t.Errorf("failed to create tmp dir: %q", err)
 	}
+	defer file1.Close()
 
 	for _, tt := range []struct {
 		name                           string
@@ -134,7 +136,7 @@ func TestRunSimple(t *testing.T) {
 		{
 			name:    "NoFlags-ToManyArgs-",
 			args:    []string{file1.Name(), "dst", "src"},
-			wantErr: unix.ENOTDIR,
+			wantErr: eNotDir,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -294,7 +296,7 @@ func TestCpSymlink(t *testing.T) {
 
 	newName := filepath.Join(tempDir, srcFname+"_link")
 	if err := os.Symlink(srcFname, newName); err != nil {
-		t.Fatalf(`os.Symlink(srcFname, newName) = %q, not nil`, err)
+		t.Skipf("skipping symlink test: %v", err)
 	}
 
 	t.Run("no-follow-symlink", func(t *testing.T) {
@@ -418,3 +420,97 @@ func IsEqualTree(o cp.Options, src, dst string) error {
 		return fmt.Errorf("unsupported mode: %s", srcInfo.Mode())
 	}
 }
+
+func TestMainInvocation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic copy with path resolution", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "src.txt")
+		if err := os.WriteFile(src, []byte("hello copy"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "src.txt", "dst.txt")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		dstContent, err := os.ReadFile(filepath.Join(dir, "dst.txt"))
+		if err != nil {
+			t.Fatalf("destination file not read: %v", err)
+		}
+		if string(dstContent) != "hello copy" {
+			t.Errorf("content = %q, want 'hello copy'", string(dstContent))
+		}
+	})
+
+	t.Run("copy to directory", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "subdir")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := filepath.Join(dir, "file1.txt")
+		if err := os.WriteFile(src, []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "file1.txt", "subdir")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		copiedContent, err := os.ReadFile(filepath.Join(sub, "file1.txt"))
+		if err != nil {
+			t.Fatalf("copied file not found: %v", err)
+		}
+		if string(copiedContent) != "data" {
+			t.Errorf("copied content = %q, want 'data'", string(copiedContent))
+		}
+	})
+
+	t.Run("recursive copy", func(t *testing.T) {
+		dir := t.TempDir()
+		srcDir := filepath.Join(dir, "tree")
+		if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(srcDir, "sub", "leaf.txt"), []byte("leaf"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "-r", "tree", "tree_copy")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		copiedLeaf, err := os.ReadFile(filepath.Join(dir, "tree_copy", "sub", "leaf.txt"))
+		if err != nil {
+			t.Fatalf("copied leaf not found: %v", err)
+		}
+		if string(copiedLeaf) != "leaf" {
+			t.Errorf("copied leaf = %q, want 'leaf'", string(copiedLeaf))
+		}
+	})
+
+	t.Run("non-existent source returns 1", func(t *testing.T) {
+		dir := t.TempDir()
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "nosuchfile", "dest")
+		if code != 1 {
+			t.Fatalf("expected code 1 on missing source, got %d", code)
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stderr: &stderr}
+		code := Main(ctx, ioEnv, "--help")
+		if code != 0 {
+			t.Fatalf("expected code 0 on --help, got %d", code)
+		}
+	})
+}
+

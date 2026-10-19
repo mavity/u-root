@@ -2,60 +2,34 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Print a sequence of numbers.
-//
-// Synopsis:
-//
-//	seq [-f FORMAT] [-w] [-s SEPARATOR] [START [STEP [END]]]
-//
-// Examples:
-//
-//	% seq -s=' ' 3
-//	1 2 3
-//	% seq -s=' ' 2 4
-//	2 3 4
-//	% seq -s=' ' 3 2 7
-//	3 5 7
-//
-// Options:
-//
-//	-f: use printf style floating-point FORMAT (default: %v)
-//	-s: use STRING to separate numbers (default: \n)
-//	-w: equalize width by padding with leading zeroes (default: false)
-package main
+// Package seq prints a sequence of numbers.
+package seq
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"strconv"
 	"strings"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 const cmd = "seq [-f format] [-w] [-s separator] [start [step [end]]]"
 
 var (
-	format     = flag.String("f", "%v", "use printf style floating-point FORMAT")
-	separator  = flag.String("s", "\n", "use STRING to separate numbers")
-	widthEqual = flag.Bool("w", false, "equalize width by padding with leading zeroes")
-)
+	ErrUsage       = errors.New(cmd)
+	ErrNegativeDec = errors.New("needs negative decrement")
+	ErrPositiveInc = errors.New("needs positive increment")
+	ErrZeroDec     = errors.New("zero decrement")
 
-func init() {
-	defUsage := flag.Usage
-	flag.Usage = func() {
-		os.Args[0] = cmd
-		defUsage()
-	}
-}
-
-var (
-	errUsage       = errors.New(cmd)
-	errNegativeDec = errors.New("needs negative decrement")
-	errPositiveInc = errors.New("needs positive increment")
-	errZeroDec     = errors.New("zero decrement")
+	errUsage       = ErrUsage
+	errNegativeDec = ErrNegativeDec
+	errPositiveInc = ErrPositiveInc
+	errZeroDec     = ErrZeroDec
 )
 
 type s struct {
@@ -139,7 +113,7 @@ func parse(format string, args []string) (s, error) {
 	return s1, nil
 }
 
-func seq(w io.Writer, format string, separator string, widthEqual bool, args []string) error {
+func runSeq(ctx context.Context, w io.Writer, format string, separator string, widthEqual bool, args []string) error {
 	s1, err := parse(format, args)
 	if err != nil {
 		return err
@@ -158,17 +132,27 @@ func seq(w io.Writer, format string, separator string, widthEqual bool, args []s
 
 	if s1.first < s1.last {
 		for s1.first <= s1.last {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			fmt.Fprintf(w, format, width, s1.first)
 			s1.first += s1.incr
-			if s1.first <= s1.last { // print only between the values
+			if s1.first <= s1.last {
 				fmt.Fprint(w, separator)
 			}
 		}
 	} else if s1.first > s1.last {
 		for s1.first >= s1.last {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 			fmt.Fprintf(w, format, width, s1.first)
 			s1.first += s1.incr
-			if s1.first >= s1.last { // print only between the values
+			if s1.first >= s1.last {
 				fmt.Fprint(w, separator)
 			}
 		}
@@ -176,13 +160,48 @@ func seq(w io.Writer, format string, separator string, widthEqual bool, args []s
 		fmt.Fprintf(w, format, width, s1.first)
 	}
 
-	fmt.Fprint(w, "\n") // last char is always '\n'
+	fmt.Fprint(w, "\n")
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := seq(os.Stdout, *format, *separator, *widthEqual, flag.Args()); err != nil {
-		log.Fatalf("seq: %v", err)
+// seq provides backward compatibility for unit tests.
+func seq(w io.Writer, format string, separator string, widthEqual bool, args []string) error {
+	return runSeq(context.Background(), w, format, separator, widthEqual, args)
+}
+
+// Main runs the seq command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "seq: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var (
+		format     string
+		separator  string
+		widthEqual bool
+	)
+	fs := flag.NewFlagSet("seq", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.StringVar(&format, "f", "%v", "use printf style floating-point FORMAT")
+	fs.StringVar(&separator, "s", "\n", "use STRING to separate numbers")
+	fs.BoolVar(&widthEqual, "w", false, "equalize width by padding with leading zeroes")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
+
+	if err := runSeq(ctx, ioEnv.Stdout, format, separator, widthEqual, fs.Args()); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "seq: %v\n", err)
+		return 1
+	}
+	return 0
 }

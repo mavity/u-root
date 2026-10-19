@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package timeout
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"testing"
 	"time"
 
-	"github.com/u-root/u-root/pkg/testutil"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestBadInvocation(t *testing.T) {
@@ -33,75 +33,32 @@ func TestBadInvocation(t *testing.T) {
 	}
 }
 
-func TestRun(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skipf("Skipping this test as sleep is not in the path")
+func TestTimeoutMain(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Runner: func(ctx context.Context, subIO core.IO, args ...string) int {
+			select {
+			case <-time.After(200 * time.Millisecond):
+				return 0
+			case <-ctx.Done():
+				return 130
+			}
+		},
 	}
 
-	tests := []struct {
-		cmd cmd
-		ok  bool
-	}{
-		{cmd: cmd{args: []string{"sleep", "4"}, timeout: 2 * time.Minute, signal: "KILL"}, ok: true},
-		{cmd: cmd{args: []string{"sleep", "30"}, timeout: time.Second, signal: "KILL"}},
-	}
-	for _, v := range tests {
-		t.Logf("Run %v", v.cmd)
-		// Return errors from running sleep are not guaranteed across all kernels.
-		// Just see if it succeeded or not.
-		if _, err := v.cmd.run(); err == nil != v.ok {
-			t.Errorf("run %v: got %v, want %v", v.cmd, err == nil, v.ok)
-		}
-	}
-}
-
-// Test real execution. Why do this if we covered all the code above?
-// Because not long ago, someone working on a different u-root
-// command got good coverage numbers but never tried
-// running the program, and they had completely broken it.
-// Tests worked, coverage was good, program was broken for real use.
-// It pays to test real operation..
-func TestProg(t *testing.T) {
-	if _, err := exec.LookPath("sleep"); err != nil {
-		t.Skipf("Skipping this test as sleep is not in the path")
+	// Should succeed when timeout is longer than runner duration
+	code := Main(context.Background(), ioEnv, "-t", "1s", "sleepy")
+	if code != 0 {
+		t.Fatalf("expected 0, got %d, stderr: %s", code, stderr.String())
 	}
 
-	c := testutil.Command(t, "-t=30s", "sleep", "4")
-	c.Stdout, c.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
-	if err := c.Run(); err != nil {
-		t.Errorf("Running -t=30 sleep 4: got %v, want nil", err)
+	// Should timeout when timeout is shorter than runner duration
+	stdout.Reset()
+	stderr.Reset()
+	code = Main(context.Background(), ioEnv, "-t", "50ms", "sleepy")
+	if code != 124 {
+		t.Fatalf("expected 124 on timeout, got %d", code)
 	}
-
-	c = testutil.Command(t, "-t=1s", "sleep", "30")
-	c.Stdout, c.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
-	if err := c.Run(); err == nil {
-		t.Errorf("Running -t=1 sleep 30: got nil, want err")
-	}
-}
-
-func TestBashExit(t *testing.T) {
-	if _, err := exec.LookPath("bash"); err != nil {
-		t.Skipf("Skipping test because there is no bash")
-	}
-	c := testutil.Command(t, "bash", "-c", "exit 20")
-	c.Stdout, c.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
-
-	err := c.Run()
-	if err == nil {
-		t.Fatalf(`Running "bash", "-c", "exit 20": got nil, want err`)
-	}
-
-	var errno int
-	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
-		errno = ee.ExitCode()
-	} else {
-		t.Fatalf(`Running "bash", "-c", "exit 20": got %T, want *exec.ExitError`, err)
-	}
-	if errno != 20 {
-		t.Fatalf(`Running "bash", "-c", "exit 20": got %d, want 20`, errno)
-	}
-}
-
-func TestMain(m *testing.M) {
-	testutil.Run(m, main)
 }

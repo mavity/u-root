@@ -1,4 +1,4 @@
-// Copyright 2012-2018 the u-root Authors. All rights reserved
+// Copyright 2012-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -18,25 +18,23 @@
 //	-t: Act as the target
 //	-f: Act as the source
 //	-v: Passed if SCP is verbose, ignored
-package main
+package scp
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
-	"path"
+	"path/filepath"
+	"strings"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 const (
 	SUCCESS = 0
-)
-
-var (
-	isTarget = flag.Bool("t", false, "Act as the target")
-	isSource = flag.Bool("f", false, "Act as the source")
-	_        = flag.Bool("v", false, "Ignored")
 )
 
 func scpSingleSource(w io.Writer, r io.Reader, pth string) error {
@@ -49,8 +47,8 @@ func scpSingleSource(w io.Writer, r io.Reader, pth string) error {
 	if err != nil {
 		return err
 	}
-	filename := path.Base(pth)
-	fmt.Fprintf(w, "C0%o %d %s\n", s.Mode(), s.Size(), filename)
+	filename := filepath.Base(pth)
+	fmt.Fprintf(w, "C0%o %d %s\n", s.Mode().Perm(), s.Size(), filename)
 	if response(r) != SUCCESS {
 		return fmt.Errorf("response was not success")
 	}
@@ -80,7 +78,7 @@ func scpSingleSink(w io.Writer, r io.Reader, path string) error {
 		}
 		return fmt.Errorf("fscanf: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, mode)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("open error: %w", err)
 	}
@@ -129,24 +127,51 @@ func response(in io.Reader) byte {
 	return b[0]
 }
 
-func main() {
-	flag.Parse()
-
-	if flag.NArg() == 0 {
-		log.Fatalf("no file provided")
-	}
-
-	if *isSource == *isTarget {
-		log.Fatalf("-t or -f needs to be supplied, and not both")
-	}
-
-	if *isSource {
-		if err := scpSource(os.Stdout, os.Stdin, flag.Args()[0]); err != nil {
-			log.Fatalf("scp: %v", err)
+// Main runs scp with the given context, I/O environment, and arguments.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
+	if err := runWithIO(ctx, ioEnv, args...); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
 		}
-	} else if *isTarget {
-		if err := scpSink(os.Stdout, os.Stdin, flag.Args()[0]); err != nil {
-			log.Fatalf("scp: %v", err)
+		fmt.Fprintf(ioEnv.Stderr, "scp: %v\n", err)
+		return 1
+	}
+	return 0
+}
+
+func runWithIO(ctx context.Context, ioEnv core.IO, args ...string) error {
+	fs := flag.NewFlagSet("scp", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	var isTarget, isSource bool
+	var ignored bool
+	fs.BoolVar(&isTarget, "t", false, "Act as the target")
+	fs.BoolVar(&isSource, "f", false, "Act as the source")
+	fs.BoolVar(&ignored, "v", false, "Ignored")
+
+	parseArgs := args
+	if len(parseArgs) > 0 && !strings.HasPrefix(parseArgs[0], "-") {
+		if parseArgs[0] == "scp" || filepath.Base(parseArgs[0]) == "scp" {
+			parseArgs = parseArgs[1:]
 		}
 	}
+
+	if err := fs.Parse(parseArgs); err != nil {
+		return err
+	}
+
+	if fs.NArg() == 0 {
+		return fmt.Errorf("no file provided")
+	}
+
+	if isSource == isTarget {
+		return fmt.Errorf("-t or -f needs to be supplied, and not both")
+	}
+
+	targetPath := ioEnv.ResolvePath(fs.Arg(0))
+
+	if isSource {
+		return scpSource(ioEnv.Stdout, ioEnv.Stdin, targetPath)
+	}
+	return scpSink(ioEnv.Stdout, ioEnv.Stdin, targetPath)
 }

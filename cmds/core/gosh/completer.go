@@ -4,7 +4,7 @@
 
 //go:build (!tinygo || tinygo.enable) && !plan9 && !goshsmall && goshbubble
 
-package main
+package gosh
 
 import (
 	"context"

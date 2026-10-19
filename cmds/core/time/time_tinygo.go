@@ -4,7 +4,7 @@
 
 //go:build tinygo
 
-package main
+package timecmd
 
 import (
 	"fmt"

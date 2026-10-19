@@ -27,20 +27,21 @@
 //   - The -w flag sets a per-packet response timeout, not an overall deadline.
 //   - No summary statistics are printed at the end.
 //   - Exits with an error if a packet times out.
-package main
+package ping
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"os"
 	"time"
 
-	"github.com/u-root/u-root/pkg/uroot/util"
+	"github.com/u-root/u-root/pkg/core"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -64,20 +65,19 @@ type cmd struct {
 	params
 }
 
-func command(stdin io.Writer, p params) (*cmd, error) {
-	netname, address := "ip4:icmp", "0.0.0.0"
-	if p.net6 {
-		netname, address = "ip6:ipv6-icmp", "::"
-	}
-	conn, err := icmp.ListenPacket(netname, address)
+func command(stdout io.Writer, p params) (*cmd, error) {
+	conn, err := listenPacket(p.net6)
 	if err != nil {
-		return nil, fmt.Errorf("can't setup %s socket on %s: %w", netname, address, err)
+		return nil, err
 	}
-
-	return &cmd{stdin, conn, p}, nil
+	return &cmd{stdout, conn, p}, nil
 }
 
 func (c *cmd) run() error {
+	return c.runCtx(context.Background())
+}
+
+func (c *cmd) runCtx(ctx context.Context) error {
 	defer c.conn.Close()
 	if c.packetSize < 8 {
 		return fmt.Errorf("packet size too small (must be >= 8): %v", c.packetSize)
@@ -93,9 +93,15 @@ func (c *cmd) run() error {
 		return fmt.Errorf("failed to resolve address: %w", err)
 	}
 
-	interval := time.Duration(c.intv)
+	interval := time.Duration(c.intv) * time.Millisecond
 	waitFor := time.Duration(c.wtf) * time.Millisecond
 	for i := uint64(0); i < c.iter; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		msg, err := c.ping(addr, i+1, waitFor)
 		if err != nil {
 			return fmt.Errorf("ping failed: %w", err)
@@ -104,7 +110,14 @@ func (c *cmd) run() error {
 			msg = "\a" + msg
 		}
 		fmt.Fprintf(c.stdout, "%s\n", msg)
-		time.Sleep(time.Millisecond * interval)
+
+		if i+1 < c.iter {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(interval):
+			}
+		}
 	}
 
 	return nil
@@ -171,29 +184,63 @@ func (c *cmd) ping(addr *net.IPAddr, i uint64, waitFor time.Duration) (string, e
 	return fmt.Sprintf("%d bytes from %v: icmp_seq=%v time=%v", n, c.host, i, latency), nil
 }
 
-func main() {
+// Main is the reentrant entry point for ping.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "ping: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	fs := flag.NewFlagSet("ping", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
 	var (
-		net6       = flag.Bool("6", false, "use ipv4 (means ip4:icmp) or 6 (ip6:ipv6-icmp)")
-		packetSize = flag.Int("s", 56, "Data size")
-		iter       = flag.Uint64("c", math.MaxUint64, "# iterations")
-		intv       = flag.Int("i", 1000, "interval in milliseconds")
-		wtf        = flag.Int("w", 1000, "wait time in milliseconds")
-		audible    = flag.Bool("a", false, "Audible rings a bell when a packet is received")
+		net6       = fs.Bool("6", false, "use ipv4 (means ip4:icmp) or 6 (ip6:ipv6-icmp)")
+		packetSize = fs.Int("s", 56, "Data size")
+		iter       = fs.Uint64("c", math.MaxUint64, "# iterations")
+		intv       = fs.Int("i", 1000, "interval in milliseconds")
+		wtf        = fs.Int("w", 1000, "wait time in milliseconds")
+		audible    = fs.Bool("a", false, "Audible rings a bell when a packet is received")
+		version    = fs.Bool("V", false, "print version")
 	)
 
-	flag.Usage = util.Usage(flag.Usage, usage)
-	flag.Parse()
-	// options without parameters (right now just: -hV)
-	if flag.NArg() != 1 {
-		flag.Usage()
-		os.Exit(1)
+	fs.Usage = func() {
+		fmt.Fprintf(ioEnv.Stderr, "Usage: %s\n", usage)
+		fs.PrintDefaults()
 	}
-	host := flag.Args()[0]
-	cmd, err := command(os.Stdout, params{*packetSize, *intv, *wtf, *iter, host, *net6, *audible})
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+
+	if *version {
+		fmt.Fprintln(ioEnv.Stdout, "u-root ping")
+		return 0
+	}
+
+	if fs.NArg() != 1 {
+		fs.Usage()
+		return 1
+	}
+
+	host := fs.Arg(0)
+	c, err := command(ioEnv.Stdout, params{*packetSize, *intv, *wtf, *iter, host, *net6, *audible})
 	if err != nil {
-		log.Fatal(err)
+		fmt.Fprintf(ioEnv.Stderr, "ping: %v\n", err)
+		return 1
 	}
-	if err := cmd.run(); err != nil {
-		log.Fatal(err)
+
+	if err := c.runCtx(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "ping: %v\n", err)
+		return 1
 	}
+	return 0
 }

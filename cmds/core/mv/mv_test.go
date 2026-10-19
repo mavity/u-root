@@ -2,15 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package mv
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func setup(t *testing.T) string {
@@ -171,3 +175,75 @@ func TestMoveFile(t *testing.T) {
 		}
 	})
 }
+
+func TestMainInvocation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("move single file with relative path resolution", func(t *testing.T) {
+		dir := t.TempDir()
+		src := filepath.Join(dir, "orig.txt")
+		if err := os.WriteFile(src, []byte("moving"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "orig.txt", "renamed.txt")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, "orig.txt")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("expected orig.txt to no longer exist, got err: %v", err)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "renamed.txt"))
+		if err != nil {
+			t.Fatalf("renamed.txt not found: %v", err)
+		}
+		if string(data) != "moving" {
+			t.Errorf("content = %q, want 'moving'", string(data))
+		}
+	})
+
+	t.Run("move to directory", func(t *testing.T) {
+		dir := t.TempDir()
+		sub := filepath.Join(dir, "target_dir")
+		if err := os.Mkdir(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		src := filepath.Join(dir, "f.txt")
+		if err := os.WriteFile(src, []byte("inside"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "f.txt", "target_dir")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		data, err := os.ReadFile(filepath.Join(sub, "f.txt"))
+		if err != nil {
+			t.Fatalf("f.txt not found in target_dir: %v", err)
+		}
+		if string(data) != "inside" {
+			t.Errorf("content = %q, want 'inside'", string(data))
+		}
+	})
+
+	t.Run("insufficient args returns 1", func(t *testing.T) {
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stderr: &stderr}
+		code := Main(ctx, ioEnv, "onlyone")
+		if code != 1 {
+			t.Fatalf("expected code 1 on insufficient args, got %d", code)
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stderr: &stderr}
+		code := Main(ctx, ioEnv, "--help")
+		if code != 0 {
+			t.Fatalf("expected code 0 on --help, got %d", code)
+		}
+	})
+}
+

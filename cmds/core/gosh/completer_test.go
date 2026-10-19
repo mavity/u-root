@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 //go:build (!tinygo || tinygo.enable) && !plan9
 
-package main
+package gosh
 
 import (
 	"os"
@@ -16,6 +16,10 @@ import (
 )
 
 func TestAutocompleteBubb(t *testing.T) {
+	p := t.TempDir()
+	os.WriteFile(filepath.Join(p, "echo"), nil, 0o777)
+	t.Setenv("PATH", p+string(filepath.ListSeparator)+os.Getenv("PATH"))
+
 	for _, tt := range []struct {
 		name        string
 		input       string
@@ -46,6 +50,9 @@ func TestAutocompleteBubb(t *testing.T) {
 }
 
 func completionsEqual(numCat, numEnt int, want []string, got editline.Completions) bool {
+	if got == nil {
+		return false
+	}
 	if got.NumCategories() < numCat {
 		return false
 	}
@@ -79,7 +86,7 @@ func TestAutocomplete(t *testing.T) {
 	p := t.TempDir()
 	os.WriteFile(filepath.Join(p, "echo"), nil, 0o777)
 	os.WriteFile(filepath.Join(p, "cat"), nil, 0o777)
-	t.Setenv("PATH", p+":"+t.TempDir())
+	t.Setenv("PATH", p+string(filepath.ListSeparator)+t.TempDir())
 
 	dir2Files := t.TempDir()
 	os.WriteFile(filepath.Join(dir2Files, "foo.txt"), nil, 0o777)

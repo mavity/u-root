@@ -21,21 +21,23 @@
 //  -r, --recursive            recursive
 //  -e, --regexp string        Pattern to match
 
-package main
+package grep
 
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
@@ -47,204 +49,179 @@ type params struct {
 	noShowMatch, quiet, count, number bool
 }
 
-type grepCommand struct {
-	rc   io.ReadCloser
+type grepInput struct {
+	r    io.Reader
 	name string
 }
 
-// run runs a command. args are as from os.Args, i.e., args[0] is the command name.
-func run(stdin io.ReadCloser, stdout io.Writer, stderr io.Writer, args []string) error {
-	var c cmd
-
-	f := flag.NewFlagSet(args[0], flag.ExitOnError)
-	f.StringVar(&c.params.expr, "regexp", "", "Pattern to match")
-	f.StringVar(&c.expr, "e", "", "Pattern to match (shorthand)")
-
-	f.BoolVar(&c.params.headers, "no-filename", false, "Suppress file name prefixes on output")
-	f.BoolVar(&c.params.headers, "h", false, "Suppress file name prefixes on output (shorthand)")
-
-	f.BoolVar(&c.params.invert, "invert-match", false, "Print only non-matching lines")
-	f.BoolVar(&c.params.invert, "v", false, "Print only non-matching lines (shorthand)")
-
-	f.BoolVar(&c.params.recursive, "recursive", false, "recursive")
-	f.BoolVar(&c.params.recursive, "r", false, "recursive")
-
-	f.BoolVar(&c.params.noShowMatch, "files-with-matches", false, "list only files")
-	f.BoolVar(&c.params.noShowMatch, "l", false, "list only files (shorthand)")
-
-	f.BoolVar(&c.params.count, "count", false, "Just show counts")
-	f.BoolVar(&c.params.count, "c", false, "Just show counts")
-
-	f.BoolVar(&c.params.caseInsensitive, "ignore-case", false, "case-insensitive matching")
-	f.BoolVar(&c.params.caseInsensitive, "i", false, "case-insensitive matching (shorthand)")
-
-	f.BoolVar(&c.params.number, "line-number", false, "Show line numbers")
-	f.BoolVar(&c.params.number, "n", false, "Show line numbers (shorthand)")
-
-	f.BoolVar(&c.params.fixed, "fixed-strings", false, "Match using fixed strings")
-	f.BoolVar(&c.params.fixed, "F", false, "Match using fixed strings (shorthand)")
-
-	f.BoolVar(&c.params.quiet, "quiet", false, "Don't print matches; exit on first match")
-	f.BoolVar(&c.params.quiet, "q", false, "Don't print matches; exit on first match (shorthand)")
-
-	f.BoolVar(&c.params.quiet, "silent", false, "Don't print matches; exit on first match")
-	f.BoolVar(&c.params.quiet, "s", false, "Don't print matches; exit on first match (shorthand)")
-
-	f.Usage = func() {
-		fmt.Fprint(f.Output(), "Usage: grep [-clFivnhqre] [FILE]...\n\n")
-		f.PrintDefaults()
-	}
-
-	f.Parse(unixflag.ArgsToGoArgs(args[1:]))
-
-	c.args = f.Args()
-	c.stdin = stdin
-	c.stdout = bufio.NewWriter(stdout)
-	c.stderr = stderr
-
-	return c.run()
-}
-
-func main() {
-	if err := run(os.Stdin, os.Stdout, os.Stderr, os.Args); err != nil {
-		if err == errQuiet {
-			os.Exit(1)
-		}
-		log.Fatal(err)
-	}
-}
-
-// cmd contains the actually business logic of grep
 type cmd struct {
-	stdin  io.ReadCloser
-	stdout *bufio.Writer
-	stderr io.Writer
-	args   []string
-	params
+	ctx        context.Context
+	stdin      io.Reader
+	stdout     *bufio.Writer
+	stderr     io.Writer
+	resolve    func(string) string
+	args       []string
+	params     params
 	matchCount int
+	matchedAny bool
 	showName   bool
 }
 
-// grep reads data from the os.File embedded in grepCommand.
-// It matches each line against the re and prints the matching result
-// If we are only looking for a match, we exit as soon as the condition is met.
-// "match" means result of re.Match == match flag.
-func (c *cmd) grep(f *grepCommand, re *regexp.Regexp) (ok bool) {
-	r := bufio.NewScanner(f.rc)
-	defer f.rc.Close()
-	var lineNum int
-	for r.Scan() {
-		line := r.Text()
+func (c *cmd) grepStream(in *grepInput, re *regexp.Regexp) (stopQuiet bool, err error) {
+	scanner := bufio.NewScanner(in.r)
+	lineNum := 0
+	for scanner.Scan() {
+		if c.ctx != nil {
+			select {
+			case <-c.ctx.Done():
+				return false, c.ctx.Err()
+			default:
+			}
+		}
+		line := scanner.Text()
 		var m bool
 		switch {
-		case c.fixed && c.caseInsensitive:
-			m = strings.Contains(strings.ToLower(line), strings.ToLower(c.expr))
-		case c.fixed && !c.caseInsensitive:
-			m = strings.Contains(line, c.expr)
+		case c.params.fixed && c.params.caseInsensitive:
+			m = strings.Contains(strings.ToLower(line), strings.ToLower(c.params.expr))
+		case c.params.fixed && !c.params.caseInsensitive:
+			m = strings.Contains(line, c.params.expr)
 		default:
 			m = re.MatchString(line)
 		}
-		if m != c.invert {
-			// in quiet mode, exit before the first match
-			if c.quiet {
-				return false
+		if m != c.params.invert {
+			c.matchedAny = true
+			if c.params.quiet {
+				return true, nil
 			}
-			c.printMatch(f, line, lineNum+1, m)
-			if c.noShowMatch {
+			c.printMatch(in, line, lineNum+1, m)
+			if c.params.noShowMatch {
 				break
 			}
 		}
 		lineNum++
 	}
-	c.stdout.Flush()
-	return true
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, c.stdout.Flush()
 }
 
-func (c *cmd) printMatch(cmd *grepCommand, line string, lineNum int, match bool) {
-	if match == !c.invert {
+func (c *cmd) printMatch(in *grepInput, line string, lineNum int, match bool) {
+	if match == !c.params.invert {
 		c.matchCount++
 	}
-	if c.count {
+	if c.params.count {
 		return
 	}
-	// at this point, we have committed to writing a line
 	defer func() {
-		c.stdout.WriteByte('\n')
+		_ = c.stdout.WriteByte('\n')
 	}()
-	// if showName, write name to stdout
 	if c.showName {
-		c.stdout.WriteString(cmd.name)
+		_, _ = c.stdout.WriteString(in.name)
 	}
-	// if dont show match, then newline and return, we are done
-	if c.noShowMatch {
+	if c.params.noShowMatch {
 		return
 	}
-	if match == !c.invert {
-		// if showName, need a :
+	if match == !c.params.invert {
 		if c.showName {
-			c.stdout.WriteByte(':')
+			_ = c.stdout.WriteByte(':')
 		}
-		// if showing line number, print the line number then a :
-		if c.number {
-			c.stdout.Write(strconv.AppendUint(nil, uint64(lineNum), 10))
-			c.stdout.WriteByte(':')
+		if c.params.number {
+			_, _ = c.stdout.Write(strconv.AppendUint(nil, uint64(lineNum), 10))
+			_ = c.stdout.WriteByte(':')
 		}
-		// now write the line to stdout
-		c.stdout.WriteString(line)
+		_, _ = c.stdout.WriteString(line)
 	}
 }
 
-func (c *cmd) run() error {
+func (c *cmd) execute() error {
 	defer c.stdout.Flush()
-	// parse the expression into valid regex
-	if c.expr != "" {
-		c.args = append([]string{c.expr}, c.args...)
+
+	if c.params.expr != "" {
+		c.args = append([]string{c.params.expr}, c.args...)
 	}
 	r := ".*"
 	if len(c.args) > 0 {
 		r = c.args[0]
 	}
-	if c.caseInsensitive && !bytes.HasPrefix([]byte(r), []byte("(?i)")) && !c.fixed {
+	if c.params.caseInsensitive && !bytes.HasPrefix([]byte(r), []byte("(?i)")) && !c.params.fixed {
 		r = "(?i)" + r
 	}
 	var re *regexp.Regexp
-	if !c.fixed {
-		re = regexp.MustCompile(r)
-	} else if c.expr == "" {
-		c.expr = c.args[0]
+	if !c.params.fixed {
+		var err error
+		re, err = regexp.Compile(r)
+		if err != nil {
+			return err
+		}
+	} else if c.params.expr == "" && len(c.args) > 0 {
+		c.params.expr = c.args[0]
 	}
 
-	// if len(c.args) < 2, then we read from stdin
 	if len(c.args) < 2 {
-		if !c.grep(&grepCommand{c.stdin, "<stdin>"}, re) {
+		r := c.stdin
+		if r == nil {
+			r = strings.NewReader("")
+		}
+		stop, err := c.grepStream(&grepInput{r: r, name: "<stdin>"}, re)
+		if err != nil {
+			return err
+		}
+		if stop {
 			return nil
 		}
 	} else {
-		c.showName = (len(c.args[1:]) > 1 || c.recursive || c.noShowMatch) && !c.headers
-		var ok bool
+		c.showName = (len(c.args[1:]) > 1 || c.params.recursive || c.params.noShowMatch) && !c.params.headers
 		for _, v := range c.args[1:] {
-			err := filepath.Walk(v, func(name string, fi os.FileInfo, err error) error {
+			resolvedRoot := v
+			if c.resolve != nil {
+				resolvedRoot = c.resolve(v)
+			}
+			stop := false
+			err := filepath.Walk(resolvedRoot, func(path string, fi os.FileInfo, err error) error {
+				if c.ctx != nil {
+					select {
+					case <-c.ctx.Done():
+						return c.ctx.Err()
+					default:
+					}
+				}
+				displayName := v
+				if path != resolvedRoot {
+					if rel, rerr := filepath.Rel(resolvedRoot, path); rerr == nil {
+						displayName = filepath.Join(v, rel)
+					} else {
+						displayName = path
+					}
+				}
 				if err != nil {
-					fmt.Fprintf(c.stderr, "grep: %v: %v\n", name, err)
+					fmt.Fprintf(c.stderr, "grep: %v: %v\n", displayName, err)
 					return nil
 				}
-				if fi.IsDir() && !c.recursive {
-					fmt.Fprintf(c.stderr, "grep: %v: Is a directory\n", name)
-					return filepath.SkipDir
+				if fi.IsDir() {
+					if !c.params.recursive {
+						fmt.Fprintf(c.stderr, "grep: %v: Is a directory\n", displayName)
+						return filepath.SkipDir
+					}
+					return nil
 				}
-				fp, err := os.Open(name)
+				fp, err := os.Open(path)
 				if err != nil {
-					fmt.Fprintf(c.stderr, "can't open %s: %v\n", name, err)
+					fmt.Fprintf(c.stderr, "can't open %s: %v\n", displayName, err)
 					return nil
 				}
 				defer fp.Close()
-				if !c.grep(&grepCommand{fp, name}, re) {
-					ok = true
-					return nil
+				stopFile, gerr := c.grepStream(&grepInput{r: fp, name: displayName}, re)
+				if gerr != nil {
+					return gerr
+				}
+				if stopFile {
+					stop = true
+					return filepath.SkipAll
 				}
 				return nil
 			})
-			if ok {
+			if stop {
 				return nil
 			}
 			if err != nil {
@@ -252,12 +229,155 @@ func (c *cmd) run() error {
 			}
 		}
 	}
-	if c.quiet {
+
+	if c.params.quiet && !c.matchedAny {
 		return errQuiet
 	}
-	if c.count {
-		c.stdout.Write(strconv.AppendUint(nil, uint64(c.matchCount), 10))
-		c.stdout.WriteByte('\n')
+	if c.params.count {
+		_, _ = c.stdout.Write(strconv.AppendUint(nil, uint64(c.matchCount), 10))
+		_ = c.stdout.WriteByte('\n')
+		_ = c.stdout.Flush()
 	}
 	return nil
+}
+
+func (c *cmd) run() error {
+	return c.execute()
+}
+
+// run is the legacy test runner kept for backward compatibility with grep_test.go.
+func run(stdin io.ReadCloser, stdout io.Writer, stderr io.Writer, args []string) error {
+	st := cmd{
+		stdin:  stdin,
+		stdout: bufio.NewWriter(stdout),
+		stderr: stderr,
+	}
+
+	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	f.StringVar(&st.params.expr, "regexp", "", "Pattern to match")
+	f.StringVar(&st.params.expr, "e", "", "Pattern to match (shorthand)")
+
+	f.BoolVar(&st.params.headers, "no-filename", false, "Suppress file name prefixes on output")
+	f.BoolVar(&st.params.headers, "h", false, "Suppress file name prefixes on output (shorthand)")
+
+	f.BoolVar(&st.params.invert, "invert-match", false, "Print only non-matching lines")
+	f.BoolVar(&st.params.invert, "v", false, "Print only non-matching lines (shorthand)")
+
+	f.BoolVar(&st.params.recursive, "recursive", false, "recursive")
+	f.BoolVar(&st.params.recursive, "r", false, "recursive")
+
+	f.BoolVar(&st.params.noShowMatch, "files-with-matches", false, "list only files")
+	f.BoolVar(&st.params.noShowMatch, "l", false, "list only files (shorthand)")
+
+	f.BoolVar(&st.params.count, "count", false, "Just show counts")
+	f.BoolVar(&st.params.count, "c", false, "Just show counts")
+
+	f.BoolVar(&st.params.caseInsensitive, "ignore-case", false, "case-insensitive matching")
+	f.BoolVar(&st.params.caseInsensitive, "i", false, "case-insensitive matching (shorthand)")
+
+	f.BoolVar(&st.params.number, "line-number", false, "Show line numbers")
+	f.BoolVar(&st.params.number, "n", false, "Show line numbers (shorthand)")
+
+	f.BoolVar(&st.params.fixed, "fixed-strings", false, "Match using fixed strings")
+	f.BoolVar(&st.params.fixed, "F", false, "Match using fixed strings (shorthand)")
+
+	f.BoolVar(&st.params.quiet, "quiet", false, "Don't print matches; exit on first match")
+	f.BoolVar(&st.params.quiet, "q", false, "Don't print matches; exit on first match (shorthand)")
+
+	f.BoolVar(&st.params.quiet, "silent", false, "Don't print matches; exit on first match")
+	f.BoolVar(&st.params.quiet, "s", false, "Don't print matches; exit on first match (shorthand)")
+
+	f.Usage = func() {
+		fmt.Fprint(f.Output(), "Usage: grep [-clFivnhqre] [FILE]...\n\n")
+		f.PrintDefaults()
+	}
+
+	if err := f.Parse(unixflag.ArgsToGoArgs(args[1:])); err != nil {
+		return err
+	}
+
+	st.args = f.Args()
+	return st.execute()
+}
+
+// Main executes the grep command with the given execution context.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "grep: internal panic: %v\n", r)
+			exitCode = 2
+		}
+	}()
+
+	st := cmd{
+		ctx:     ctx,
+		stdin:   ioEnv.Stdin,
+		stdout:  bufio.NewWriter(ioEnv.Stdout),
+		stderr:  ioEnv.Stderr,
+		resolve: ioEnv.ResolvePath,
+	}
+
+	f := flag.NewFlagSet("grep", flag.ContinueOnError)
+	f.SetOutput(ioEnv.Stderr)
+
+	f.StringVar(&st.params.expr, "regexp", "", "Pattern to match")
+	f.StringVar(&st.params.expr, "e", "", "Pattern to match (shorthand)")
+
+	f.BoolVar(&st.params.headers, "no-filename", false, "Suppress file name prefixes on output")
+	f.BoolVar(&st.params.headers, "h", false, "Suppress file name prefixes on output (shorthand)")
+
+	f.BoolVar(&st.params.invert, "invert-match", false, "Print only non-matching lines")
+	f.BoolVar(&st.params.invert, "v", false, "Print only non-matching lines (shorthand)")
+
+	f.BoolVar(&st.params.recursive, "recursive", false, "recursive")
+	f.BoolVar(&st.params.recursive, "r", false, "recursive")
+
+	f.BoolVar(&st.params.noShowMatch, "files-with-matches", false, "list only files")
+	f.BoolVar(&st.params.noShowMatch, "l", false, "list only files (shorthand)")
+
+	f.BoolVar(&st.params.count, "count", false, "Just show counts")
+	f.BoolVar(&st.params.count, "c", false, "Just show counts")
+
+	f.BoolVar(&st.params.caseInsensitive, "ignore-case", false, "case-insensitive matching")
+	f.BoolVar(&st.params.caseInsensitive, "i", false, "case-insensitive matching (shorthand)")
+
+	f.BoolVar(&st.params.number, "line-number", false, "Show line numbers")
+	f.BoolVar(&st.params.number, "n", false, "Show line numbers (shorthand)")
+
+	f.BoolVar(&st.params.fixed, "fixed-strings", false, "Match using fixed strings")
+	f.BoolVar(&st.params.fixed, "F", false, "Match using fixed strings (shorthand)")
+
+	f.BoolVar(&st.params.quiet, "quiet", false, "Don't print matches; exit on first match")
+	f.BoolVar(&st.params.quiet, "q", false, "Don't print matches; exit on first match (shorthand)")
+	f.BoolVar(&st.params.quiet, "silent", false, "Don't print matches; exit on first match")
+	f.BoolVar(&st.params.quiet, "s", false, "Don't print matches; exit on first match (shorthand)")
+
+	f.Usage = func() {
+		fmt.Fprint(f.Output(), "Usage: grep [-clFivnhqre] [FILE]...\n\n")
+		f.PrintDefaults()
+	}
+
+	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	st.args = f.Args()
+	if err := st.execute(); err != nil {
+		if errors.Is(err, errQuiet) {
+			return 1
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "grep: %v\n", err)
+		return 2
+	}
+
+	if !st.matchedAny {
+		return 1
+	}
+	return 0
 }

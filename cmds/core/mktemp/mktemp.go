@@ -8,42 +8,27 @@
 //
 //	mktemp [OPTION]... [TEMPLATE]
 //
-//	Create  a  temporary  file or directory, safely, and print its name.  TEMPLATE must contain at least 3 consecutive 'X's in last component.  If TEMPLATE is not specified, use tmp.XXXXXXXXXX, and --tmpdir is implied.  Files are
-//	created u+rw, and directories u+rwx, minus umask restrictions.
+// Options:
 //
-//	-d, --directory
-//	       create a directory, not a file
-//
-//	-u, --dry-run
-//	       do not create anything; merely print a name (unsafe)
-//
-//	-q, --quiet
-//	       suppress diagnostics about file/dir-creation failure
-//
-//	--suffix=SUFF
-//	       append SUFF to TEMPLATE; SUFF must not contain a slash.  This option is implied if TEMPLATE does not end in X
-//
-//	-p DIR, --tmpdir[=DIR]
-//	       interpret TEMPLATE relative to DIR; if DIR is not specified, use $TMPDIR if set, else /tmp.  With this option, TEMPLATE must not be an absolute name; unlike with -t, TEMPLATE may contain  slashes,  but  mktemp  creates
-//	       only the final component
-package main
+//	-d, --directory: create a directory, not a file
+//	-u, --dry-run: do not create anything; merely print a name (unsafe)
+//	-q, --quiet: suppress diagnostics about file/dir-creation failure
+//	--suffix=SUFF: append SUFF to TEMPLATE
+//	-p DIR, --tmpdir[=DIR]: interpret TEMPLATE relative to DIR
+package mktemp
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
-
-type cmd struct {
-	stdout io.Writer
-	flags  flags
-	args   []string
-}
 
 type flags struct {
 	d      bool
@@ -52,41 +37,6 @@ type flags struct {
 	prefix string
 	suffix string
 	dir    string
-}
-
-func (c *cmd) mktemp() (string, error) {
-	if c.flags.dir == "" {
-		c.flags.dir = os.TempDir()
-	}
-
-	if c.flags.u {
-		if !c.flags.q {
-			log.Printf("Not doing anything but dry-run is an inherently unsafe concept")
-		}
-		return "", nil
-	}
-
-	if c.flags.d {
-		return os.MkdirTemp(c.flags.dir, c.flags.prefix)
-	}
-	f, err := os.CreateTemp(c.flags.dir, c.flags.prefix)
-	if err != nil {
-		return "", err
-	}
-	return f.Name(), nil
-}
-
-func (c *cmd) run() error {
-	fileName, err := c.mktemp()
-	if err != nil {
-		if c.flags.q {
-			return nil
-		}
-		return err
-	}
-
-	fmt.Fprintf(c.stdout, "%s\n", fileName)
-	return nil
 }
 
 func (f *flags) register(fs *flag.FlagSet) {
@@ -100,44 +50,94 @@ func (f *flags) register(fs *flag.FlagSet) {
 	fs.BoolVar(&f.q, "q", false, "Quiet: show no errors (shorthand)")
 
 	fs.StringVar(&f.prefix, "prefix", "", "add a prefix")
-	fs.StringVar(&f.prefix, "s", "", "add a prefix (shorthand, 's' is for compatibility with GNU mktemp")
+	fs.StringVar(&f.prefix, "s", "", "add a prefix (shorthand, 's' is for compatibility with GNU mktemp)")
 
 	fs.StringVar(&f.suffix, "suffix", "", "add a suffix to the prefix (rather than the end of the mktemp file)")
 
-	fs.StringVar(&f.dir, "tmpdir", "", "Tmp directory to use. If this is not set, TMPDIR is used, else /tmp")
-	fs.StringVar(&f.dir, "p", "", "Tmp directory to use. If this is not set, TMPDIR is used, else /tmp (shorthand)")
-
+	fs.StringVar(&f.dir, "tmpdir", "", "Tmp directory to use. If this is not set, TMPDIR is used, else default temp dir")
+	fs.StringVar(&f.dir, "p", "", "Tmp directory to use. If this is not set, TMPDIR is used, else default temp dir (shorthand)")
 }
 
-func command(stdout io.Writer, args []string) *cmd {
-	var c cmd
-	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
-	c.flags.register(fs)
+func mktemp(ioEnv core.IO, f flags) (string, error) {
+	dir := f.dir
+	if dir == "" {
+		if tmpdir := ioEnv.Getenv("TMPDIR"); tmpdir != "" {
+			dir = tmpdir
+		} else {
+			dir = os.TempDir()
+		}
+	} else {
+		dir = ioEnv.ResolvePath(dir)
+	}
+
+	if f.u {
+		if !f.q {
+			log.Printf("Not doing anything but dry-run is an inherently unsafe concept")
+		}
+		return "", nil
+	}
+
+	if f.d {
+		return os.MkdirTemp(dir, f.prefix)
+	}
+	file, err := os.CreateTemp(dir, f.prefix)
+	if err != nil {
+		return "", err
+	}
+	_ = file.Close()
+	return file.Name(), nil
+}
+
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var f flags
+	fs := flag.NewFlagSet("mktemp", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	f.register(fs)
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: mktemp [options] [template]\n")
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(unixflag.ArgsToGoArgs(args[1:]))
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
 
-	c.stdout = stdout
-	c.args = fs.Args()
-
-	switch len(c.args) {
+	switch fs.NArg() {
 	case 1:
-		c.flags.prefix = c.flags.prefix + strings.Split(c.args[0], "X")[0] + c.flags.suffix
+		f.prefix = f.prefix + strings.Split(fs.Args()[0], "X")[0] + f.suffix
 	case 0:
 	default:
 		fs.Usage()
-		os.Exit(1)
+		return fmt.Errorf("too many arguments")
 	}
 
-	return &c
+	fileName, err := mktemp(ioEnv, f)
+	if err != nil {
+		if f.q {
+			return nil
+		}
+		return err
+	}
+
+	fmt.Fprintf(ioEnv.Stdout, "%s\n", fileName)
+	return nil
 }
 
-func main() {
-	if err := command(os.Stdout, os.Args).run(); err != nil {
-		log.Fatal(err)
+// Main runs the mktemp command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "mktemp: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "mktemp: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

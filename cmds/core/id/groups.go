@@ -2,9 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !plan9
-
-package main
+package id
 
 import (
 	"bufio"
@@ -60,6 +58,7 @@ func NewGroups(file string) (g *Groups, e error) {
 	if err != nil {
 		return g, err
 	}
+	defer groupFile.Close()
 
 	var groupInfo []string
 
@@ -71,6 +70,9 @@ func NewGroups(file string) (g *Groups, e error) {
 			continue
 		}
 		groupInfo = strings.Split(txt, ":")
+		if len(groupInfo) < 3 {
+			continue
+		}
 		groupNum, err := strconv.Atoi(groupInfo[2])
 		if err != nil {
 			return nil, err
@@ -79,12 +81,14 @@ func NewGroups(file string) (g *Groups, e error) {
 		g.gidToGroup[groupNum] = groupInfo[0]
 		g.groupToGID[groupInfo[0]] = groupNum
 
-		users := strings.SplitSeq(groupInfo[3], ",")
-		for u := range users {
-			g.userToGIDs[u] = append(g.userToGIDs[u], groupNum)
-			g.gidToUsers[groupNum] = append(g.gidToUsers[groupNum], u)
+		if len(groupInfo) >= 4 && len(groupInfo[3]) > 0 {
+			users := strings.SplitSeq(groupInfo[3], ",")
+			for u := range users {
+				g.userToGIDs[u] = append(g.userToGIDs[u], groupNum)
+				g.gidToUsers[groupNum] = append(g.gidToUsers[groupNum], u)
+			}
 		}
 	}
 
-	return
+	return g, nil
 }

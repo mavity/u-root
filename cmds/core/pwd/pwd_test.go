@@ -2,12 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package pwd
 
 import (
-	"os"
+	"bytes"
+	"context"
+	"io"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestPWD(t *testing.T) {
@@ -28,32 +33,39 @@ func TestPWD(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
-			err := os.Chdir(dir)
-			if err != nil {
-				t.Fatalf("os.Chdir(%q): got %v, want nil", dir, err)
-			}
-
-			// required on macOS, where tempDir returns path with symlink
-			// and PWD is defined on bash and zsh
-			err = os.Setenv("PWD", dir)
-			if err != nil {
-				t.Fatalf("os.Setenv(%q): got %v, want nil", dir, err)
-			}
 
 			expected := dir
 			if tt.physical {
+				var err error
 				expected, err = filepath.EvalSymlinks(dir)
 				if err != nil {
 					t.Fatalf("filepath.EvalSymlinks(%q): got %v, want nil", dir, err)
 				}
 			}
 
-			res, err := pwd(tt.physical)
+			ioEnv := core.IO{Dir: dir}
+			res, err := pwd(ioEnv, tt.physical)
 			if err != nil {
 				t.Fatalf("pwd(%t): error got %v, want nil", tt.physical, err)
 			}
 			if res != expected {
 				t.Errorf("pwd(%t): got %q, want %q", tt.physical, res, expected)
+			}
+
+			var stdout bytes.Buffer
+			ioEnv.Stdout = &stdout
+			ioEnv.Stderr = io.Discard
+			var args []string
+			if tt.physical {
+				args = []string{"-P"}
+			} else {
+				args = []string{"-L"}
+			}
+			if err := run(context.Background(), ioEnv, args...); err != nil {
+				t.Fatalf("run(%v): error got %v", args, err)
+			}
+			if strings.TrimSpace(stdout.String()) != expected {
+				t.Errorf("run(%v): got %q, want %q", args, strings.TrimSpace(stdout.String()), expected)
 			}
 		})
 	}

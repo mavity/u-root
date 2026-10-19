@@ -10,43 +10,84 @@
 //
 // Options:
 //
-//	-P: don't follow symlinks
-//
-// Author:
-//
-//	created by Beletti (rhiguita@gmail.com)
-package main
+//	-L: don't follow any symlinks
+//	-P: follow all symlinks (avoid all symlinks)
+package pwd
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-var (
-	// This is the default. Setting it to false doesn't do anything in GNU
-	// or zsh pwd, because you just can't even set it to false.
-	_ = flag.Bool("L", true, "don't follow any symlinks")
-
-	physical = flag.Bool("P", false, "follow all symlinks (avoid all symlinks)")
-)
-
-func pwd(followSymlinks bool) (string, error) {
-	path, err := os.Getwd()
-	if err == nil && followSymlinks {
-		path, err = filepath.EvalSymlinks(path)
+func pwd(ioEnv core.IO, followSymlinks bool) (string, error) {
+	path := ioEnv.Dir
+	if path == "" {
+		var err error
+		path, err = os.Getwd()
+		if err != nil {
+			return "", err
+		}
 	}
-	return path, err
+	if followSymlinks {
+		var err error
+		path, err = filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", err
+		}
+	}
+	return path, nil
 }
 
-func main() {
-	flag.Parse()
-
-	path, err := pwd(*physical)
-	if err != nil {
-		log.Fatalf("%v", err)
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
 	}
-	fmt.Println(path)
+
+	var (
+		logical  = true
+		physical bool
+	)
+
+	fs := flag.NewFlagSet("pwd", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&logical, "L", true, "don't follow any symlinks")
+	fs.BoolVar(&physical, "P", false, "follow all symlinks (avoid all symlinks)")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
+
+	path, err := pwd(ioEnv, physical)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(ioEnv.Stdout, path)
+	return err
+}
+
+// Main runs the pwd command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "pwd: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "pwd: %v\n", err)
+		}
+		return 1
+	}
+	return 0
 }

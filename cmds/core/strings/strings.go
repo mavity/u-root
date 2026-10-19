@@ -2,44 +2,34 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Strings finds printable strings.
-//
-// Synopsis:
-//
-//	strings OPTIONS [FILES]...
-//
-// Description:
-//
-//	Prints all sequences of `n` or more printable characters terminated by a
-//	non-printable character (or EOF).
-//
-//	If no files are specified, read from stdin.
-//
-// Options:
-//
-//	-n number: the minimum string length (default is 4)
-//	-t string: write each string preceded by its byte offset from the start of the file (d decimal, o octal, x hexadecimal)
-package main
+// Package stringscmd finds printable strings.
+package stringscmd
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 var (
-	errInvalidFormatArgument = fmt.Errorf("invalid argument to option -t")
-	errInvalidMinLength      = fmt.Errorf("invalid minimum string length -n")
+	ErrInvalidFormatArgument = fmt.Errorf("invalid argument to option -t")
+	ErrInvalidMinLength      = fmt.Errorf("invalid minimum string length -n")
+
+	errInvalidFormatArgument = ErrInvalidFormatArgument
+	errInvalidMinLength      = ErrInvalidMinLength
 )
 
 type cmd struct {
 	stdin  io.Reader
 	stdout io.Writer
+	stderr io.Writer
 	params
 	args   []string
 	offset int
@@ -60,34 +50,20 @@ func command(stdin io.Reader, stdout io.Writer, p params, args []string) *cmd {
 }
 
 func (c *cmd) run() error {
-	if c.n < 1 {
-		return fmt.Errorf("%w: %d", errInvalidMinLength, c.n)
+	ioEnv := core.IO{
+		Stdin:  c.stdin,
+		Stdout: c.stdout,
+		Stderr: c.stderr,
 	}
-	if c.t != "" && c.t != "d" && c.t != "o" && c.t != "x" {
-		return fmt.Errorf("%w: %s", errInvalidFormatArgument, c.t)
-	}
-	if len(c.args) == 0 {
-		rb := bufio.NewReader(c.stdin)
-		if err := c.stringsIO(rb, c.stdout); err != nil {
-			return err
-		}
-	}
-	for _, file := range c.args {
-		c.offset = 0
-		if err := c.stringsFile(file, c.stdout); err != nil {
-			return err
-		}
-	}
-	return nil
+	return runStrings(context.Background(), ioEnv, c.params, c.args)
 }
 
 func asciiIsPrint(char byte) bool {
 	return char >= 32 && char <= 126
 }
 
-func (c *cmd) offsetValue(l int) string {
-	offset := c.offset - l
-	switch c.t {
+func offsetValue(t string, offset int) string {
+	switch t {
 	case "d":
 		return fmt.Sprintf("%d ", offset)
 	case "o":
@@ -95,21 +71,27 @@ func (c *cmd) offsetValue(l int) string {
 	case "x":
 		return fmt.Sprintf("%x ", offset)
 	default:
-		panic("t param parsed wrong")
+		return ""
 	}
 }
 
-func (c *cmd) stringsIO(r *bufio.Reader, w io.Writer) error {
+func stringsIO(ctx context.Context, r *bufio.Reader, w io.Writer, p params) error {
 	var o []byte
+	offset := 0
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		b, err := r.ReadByte()
 		if err == io.EOF {
-			if len(o) >= c.n {
-				if c.t != "" {
-					w.Write([]byte(c.offsetValue(len(o))))
+			if len(o) >= p.n {
+				if p.t != "" {
+					_, _ = w.Write([]byte(offsetValue(p.t, offset-len(o))))
 				}
-				w.Write(o)
-				w.Write([]byte{'\n'})
+				_, _ = w.Write(o)
+				_, _ = w.Write([]byte{'\n'})
 			}
 			return nil
 		}
@@ -117,47 +99,93 @@ func (c *cmd) stringsIO(r *bufio.Reader, w io.Writer) error {
 			return err
 		}
 		if !asciiIsPrint(b) {
-			if len(o) >= c.n {
-				if c.t != "" {
-					w.Write([]byte(c.offsetValue(len(o))))
+			if len(o) >= p.n {
+				if p.t != "" {
+					_, _ = w.Write([]byte(offsetValue(p.t, offset-len(o))))
 				}
-				w.Write(o)
-				w.Write([]byte{'\n'})
+				_, _ = w.Write(o)
+				_, _ = w.Write([]byte{'\n'})
 			}
 			o = o[:0]
-			c.offset++
+			offset++
 			continue
 		}
-		// Prevent the buffer from growing indefinitely.
-		if len(o) >= c.n+1024 {
-			w.Write(o[:1024])
+		if len(o) >= p.n+1024 {
+			_, _ = w.Write(o[:1024])
 			o = o[1024:]
 		}
 		o = append(o, b)
-		c.offset++
+		offset++
 	}
 }
 
-func (c *cmd) stringsFile(file string, w io.Writer) error {
-	f, err := os.Open(file)
-	if err != nil {
-		return err
+func runStrings(ctx context.Context, ioEnv core.IO, p params, args []string) error {
+	if p.n < 1 {
+		return fmt.Errorf("%w: %d", errInvalidMinLength, p.n)
 	}
-	defer f.Close()
-
-	// Buffer reduces number of syscalls.
-	rb := bufio.NewReader(f)
-	return c.stringsIO(rb, w)
+	if p.t != "" && p.t != "d" && p.t != "o" && p.t != "x" {
+		return fmt.Errorf("%w: %s", errInvalidFormatArgument, p.t)
+	}
+	if len(args) == 0 {
+		rb := bufio.NewReader(ioEnv.Stdin)
+		return stringsIO(ctx, rb, ioEnv.Stdout, p)
+	}
+	for _, file := range args {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if file == "-" {
+			rb := bufio.NewReader(ioEnv.Stdin)
+			if err := stringsIO(ctx, rb, ioEnv.Stdout, p); err != nil {
+				return err
+			}
+		} else {
+			resolved := ioEnv.ResolvePath(file)
+			f, err := os.Open(resolved)
+			if err != nil {
+				return err
+			}
+			rb := bufio.NewReader(f)
+			err = stringsIO(ctx, rb, ioEnv.Stdout, p)
+			_ = f.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-func main() {
-	var n int
-	var t string
-	f := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	f.IntVar(&n, "n", 4, "the minimum string length")
-	f.StringVar(&t, "t", "", "write each string preceded by its byte offset from the start of the file (d decimal, o octal, x hexadecimal)")
-	f.Parse(unixflag.OSArgsToGoArgs())
-	if err := command(os.Stdin, os.Stdout, params{n: n, t: t}, f.Args()).run(); err != nil {
-		log.Fatalf("strings: %v", err)
+// Main runs the strings command.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "strings: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var p params
+	fs := flag.NewFlagSet("strings", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.IntVar(&p.n, "n", 4, "the minimum string length")
+	fs.StringVar(&p.t, "t", "", "write each string preceded by its byte offset from the start of the file (d decimal, o octal, x hexadecimal)")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
 	}
+
+	if err := runStrings(ctx, ioEnv, p, fs.Args()); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
+		fmt.Fprintf(ioEnv.Stderr, "strings: %v\n", err)
+		return 1
+	}
+	return 0
 }

@@ -4,17 +4,14 @@
 
 //go:build plan9
 
-package main
+package lscmd
 
 import (
-	"flag"
 	"fmt"
 	"strings"
 
 	"github.com/u-root/u-root/pkg/ls"
 )
-
-var final = flag.Bool("p", false, "Print only the final path element of each file name")
 
 func (c cmd) printFile(stringer ls.Stringer, f file) {
 	if f.err != nil {
@@ -24,7 +21,7 @@ func (c cmd) printFile(stringer ls.Stringer, f file) {
 	// Hide .files unless -a was given
 	if c.all || !strings.HasPrefix(f.lsfi.Name, ".") {
 		// Unless they said -p, we always print the full path
-		if !*final {
+		if !c.final {
 			f.lsfi.Name = f.path
 		}
 		if c.classify {

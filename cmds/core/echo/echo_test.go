@@ -2,11 +2,16 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package echo
 
 import (
 	"bytes"
+	"context"
+	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 // Test echo cmd
@@ -103,3 +108,115 @@ func TestEcho(t *testing.T) {
 		})
 	}
 }
+
+func TestEchoMain(t *testing.T) {
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+	code := Main(t.Context(), ioEnv, "-n", "hello", "world")
+	if code != 0 {
+		t.Fatalf("Main returned %d, err: %s", code, errOut.String())
+	}
+	if out.String() != "hello world" {
+		t.Fatalf("got %q, want 'hello world'", out.String())
+	}
+}
+
+func TestEchoQuotesAndBackslashC(t *testing.T) {
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+	code := Main(t.Context(), ioEnv, "-e", "hello \"world\"")
+	if code != 0 {
+		t.Fatalf("Main returned %d, err: %s", code, errOut.String())
+	}
+	if out.String() != "hello \"world\"\n" {
+		t.Fatalf("got %q, want 'hello \"world\"\\n'", out.String())
+	}
+}
+
+func TestEchoReentrancyAndConcurrency(t *testing.T) {
+	const goroutines = 50
+	errCh := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			var out, errOut bytes.Buffer
+			ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+			code := Main(context.Background(), ioEnv, "-n", fmt.Sprintf("id=%d", id))
+			if code != 0 {
+				errCh <- fmt.Errorf("goroutine %d exited with code %d: %s", id, code, errOut.String())
+				return
+			}
+			expected := fmt.Sprintf("id=%d", id)
+			if out.String() != expected {
+				errCh <- fmt.Errorf("goroutine %d got %q, want %q", id, out.String(), expected)
+				return
+			}
+			errCh <- nil
+		}(i)
+	}
+	for i := 0; i < goroutines; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestEchoContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancelled
+
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+	code := Main(ctx, ioEnv, "should", "not", "run")
+	if code != 130 {
+		t.Fatalf("expected code 130 for cancelled context, got %d", code)
+	}
+}
+
+func TestEchoFlagsAndHelp(t *testing.T) {
+	// -h should return 0
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-h")
+		if code != 0 {
+			t.Fatalf("expected code 0 for -h, got %d", code)
+		}
+		if !strings.Contains(errOut.String(), "Usage:") {
+			t.Fatalf("expected usage message in stderr, got: %q", errOut.String())
+		}
+	}
+
+	// invalid flag should return 1
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-invalid-flag-xyz")
+		if code != 1 {
+			t.Fatalf("expected code 1 for invalid flag, got %d", code)
+		}
+	}
+}
+
+func TestEchoEscapesFull(t *testing.T) {
+	// Test -E disables escapes
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-E", "hello\\nworld")
+		if code != 0 || out.String() != "hello\\nworld\n" {
+			t.Fatalf("-E failed: got %q, code=%d", out.String(), code)
+		}
+	}
+
+	// Test \0NNN octal and \xHH hex
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-n", "-e", "\\0101\\x42")
+		if code != 0 || out.String() != "AB" {
+			t.Fatalf("octal/hex failed: got %q, code=%d", out.String(), code)
+		}
+	}
+}
+
+

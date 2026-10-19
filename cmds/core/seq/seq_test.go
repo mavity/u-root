@@ -4,7 +4,7 @@
 
 // created by Manoel Vilela < manoel_vilela@engineer.com >
 
-package main
+package seq
 
 import (
 	"bytes"

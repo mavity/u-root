@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package netcat
 
 import (
 	"bufio"
@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -209,7 +210,7 @@ func TestConnect(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var wg sync.WaitGroup
 
-			l, err := net.Listen("tcp", tt.address)
+			l, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -237,7 +238,7 @@ func TestConnect(t *testing.T) {
 			}
 
 			var output closableBuffer
-			err = c.connect(&output, "tcp", "127.0.0.1:8080")
+			err = c.connect(&output, "tcp", l.Addr().String())
 			if err != nil {
 				if !tt.expectError {
 					return
@@ -604,6 +605,9 @@ func TestEstablishConnectionUnix(t *testing.T) {
 					defer conn.Close()
 				})
 			case "unixgram":
+				if runtime.GOOS == "windows" {
+					t.Skip("unixgram is not supported on windows")
+				}
 				unixL, err := net.ListenPacket(tt.network, socketPath)
 				if err != nil {
 					t.Fatal(err)

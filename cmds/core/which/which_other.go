@@ -4,8 +4,14 @@
 
 //go:build !darwin && !dragonfly && !freebsd && !linux && !nacl && !netbsd && !openbsd && !solaris
 
-package main
+package which
+
+import "os"
 
 func canExecute(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.IsDir() {
+		return false
+	}
 	return true
 }

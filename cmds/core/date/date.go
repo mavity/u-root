@@ -2,23 +2,27 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// date prints the date.
+// Package date prints and formats the system date and time.
 //
 // Synopsis:
 //
-//	date [-u] [+format] | date [-u] [MMDDhhmm[CC]YY[.ss]]
-package main
+//	date [-u] [-r FILE] [-d FILE] [+format] | date [-u] [MMDDhhmm[CC]YY[.ss]]
+package date
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 type Clock interface {
@@ -31,45 +35,25 @@ func (r RealClock) Now() time.Time {
 	return time.Now()
 }
 
-var (
-	// default format map from format.go on time lib
-	// Help to make format of date with posix compliant
-	fmtMap = map[string]string{
-		"%a": "Mon",
-		"%A": "Monday",
-		"%b": "Jan",
-		"%h": "Jan",
-		"%B": "January",
-		"%c": time.UnixDate,
-		"%d": "02",
-		"%e": "_2",
-		"%H": "15",
-		"%I": "03",
-		"%m": "1",
-		"%M": "04",
-		"%p": "PM",
-		"%S": "05",
-		"%y": "06",
-		"%Y": "2006",
-		"%z": "-0700",
-		"%Z": "MST",
-	}
-	flags struct {
-		universal bool
-		reference string
-	}
-)
-
-const cmd = "date [-u] [-d FILE] [+format] | date [-u] [-d FILE] [MMDDhhmm[CC]YY[.ss]]"
-
-func init() {
-	defUsage := flag.Usage
-	flag.Usage = func() {
-		os.Args[0] = cmd
-		defUsage()
-	}
-	flag.BoolVar(&flags.universal, "u", false, "Coordinated Universal Time (UTC)")
-	flag.StringVar(&flags.reference, "r", "", "Display the last modification time of FILE")
+var fmtMap = map[string]string{
+	"%a": "Mon",
+	"%A": "Monday",
+	"%b": "Jan",
+	"%h": "Jan",
+	"%B": "January",
+	"%c": time.UnixDate,
+	"%d": "02",
+	"%e": "_2",
+	"%H": "15",
+	"%I": "03",
+	"%m": "1",
+	"%M": "04",
+	"%p": "PM",
+	"%S": "05",
+	"%y": "06",
+	"%Y": "2006",
+	"%z": "-0700",
+	"%Z": "MST",
 }
 
 // regex search for +format POSIX patterns
@@ -93,34 +77,22 @@ func dateMap(t time.Time, z *time.Location, format string) string {
 		translate, exists := fmtMap[match]
 		switch {
 		case exists:
-			// Values defined by fmtMap
 			toReplace = d.Format(translate)
 		case match == "%C":
-			// Century (a year divided by 100 and truncated to an integer)
-			// as a decimal number [00,99].
 			toReplace = strconv.Itoa(d.Year() / 100)
 		case match == "%D":
-			// Date in the format mm/dd/yy.
 			toReplace = dateMap(t, z, "%m/%d/%y")
 		case match == "%j":
-			// Day of the year as a decimal number [001,366]."
 			toReplace = strconv.Itoa(d.YearDay())
 		case match == "%n":
-			// A <newline>.
 			toReplace = "\n"
 		case match == "%r":
-			// 12-hour clock time [01,12] using the AM/PM notation;
-			// in the POSIX locale, this shall be equivalent to %I : %M : %S %p.
 			toReplace = dateMap(t, z, "%I:%M:%S %p")
 		case match == "%t":
-			// A <tab>.
 			toReplace = "\t"
 		case match == "%T":
 			toReplace = dateMap(t, z, "%H:%M:%S")
 		case match == "%W":
-			// Week of the year (Sunday as the first day of the week)
-			// as a decimal number [00,53]. All days in a new year preceding
-			// the first Sunday shall be considered to be in week 0.
 			_, weekYear := d.ISOWeek()
 			weekDay := int(d.Weekday())
 			isNotSunday := 1
@@ -129,31 +101,21 @@ func dateMap(t time.Time, z *time.Location, format string) string {
 			}
 			toReplace = strconv.Itoa(weekYear - (isNotSunday))
 		case match == "%w":
-			// Weekday as a decimal number [0,6] (0=Sunday).
 			toReplace = strconv.Itoa(int(d.Weekday()))
 		case match == "%V":
-			// Week of the year (Monday as the first day of the week)
-			// as a decimal number [01,53]. If the week containing January 1
-			// has four or more days in the new year, then it shall be
-			// considered week 1; otherwise, it shall be the last week
-			// of the previous year, and the next week shall be week 1.
 			_, weekYear := d.ISOWeek()
 			toReplace = strconv.Itoa(int(weekYear))
 		case match == "%x":
-			// Locale's appropriate date representation.
-			toReplace = dateMap(t, z, "%m/%d/%y") // TODO: decision algorithm
+			toReplace = dateMap(t, z, "%m/%d/%y")
 		case match == "%F":
-			// Date yyyy-mm-dd defined by GNU implementation
 			toReplace = dateMap(t, z, "%Y-%m-%d")
 		case match == "%X":
-			// Locale's appropriate time representation.
-			toReplace = dateMap(t, z, "%I:%M:%S %p") // TODO: decision algorithm
+			toReplace = dateMap(t, z, "%I:%M:%S %p")
 		default:
 			continue
 		}
 
 		format = strings.Replace(format, match, toReplace, 1)
-		// fmt.Printf("Iteration[%d]: %v\n", iter, format)
 	}
 	return format
 }
@@ -169,16 +131,8 @@ func ints(s string, i ...*int) error {
 	return nil
 }
 
-// getTime gets the desired time as a time.Time.
-// It derives it from a unix date command string.
-// Some values in the string are optional, namely
-// YY and SS. For these values, we use
-// time.Now(). For the timezone, we use whatever
-// one we are in, or UTC if desired.
 func getTime(z *time.Location, s string, clocksource Clock) (t time.Time, err error) {
 	var MM, DD, hh, mm int
-	// CC is the year / 100, not the "century".
-	// i.e. for 2001, CC is 20, not 21.
 	YY := clocksource.Now().Year() % 100
 	CC := clocksource.Now().Year() / 100
 	SS := clocksource.Now().Second()
@@ -244,16 +198,42 @@ func run(args []string, univ bool, ref string, clocksource Clock, w io.Writer) e
 			}
 		}
 	default:
-		flag.Usage()
-		return nil
+		return errors.New("date: invalid argument count")
 	}
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	rc := RealClock{}
-	if err := run(flag.Args(), flags.universal, flags.reference, rc, os.Stdout); err != nil {
-		log.Fatalf("date: %v", err)
+// Main runs the date command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "date: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	var univ bool
+	var ref string
+	fs := flag.NewFlagSet("date", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&univ, "u", false, "Coordinated Universal Time (UTC)")
+	fs.StringVar(&ref, "r", "", "Display the last modification time of FILE")
+	fs.StringVar(&ref, "d", "", "Display the last modification time of FILE")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return 1
 	}
+
+	resolvedRef := ref
+	if ref != "" {
+		resolvedRef = ioEnv.ResolvePath(ref)
+	}
+
+	if err := run(fs.Args(), univ, resolvedRef, RealClock{}, ioEnv.Stdout); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "date: %v\n", err)
+		}
+		return 1
+	}
+	return 0
 }

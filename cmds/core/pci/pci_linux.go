@@ -1,6 +1,8 @@
-// Copyright 2012-2017 the u-root Authors. All rights reserved
+// Copyright 2012-2026 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
+
+//go:build linux
 
 // pci: show pci bus vendor ids and other info
 //
@@ -13,9 +15,10 @@
 //	-n: just show numbers
 //	-c: dump config space
 //	-s: specify glob for choosing devices.
-package main
+package pci
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -26,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/pci"
 )
 
@@ -48,7 +52,8 @@ type cmd struct {
 var errBadJSON = errors.New("JSON parsing failed")
 
 func command(w io.Writer, args ...string) *cmd {
-	f := flag.NewFlagSet("pci", flag.ExitOnError)
+	f := flag.NewFlagSet("pci", flag.ContinueOnError)
+	f.SetOutput(w)
 
 	c := &cmd{
 		w:      w,
@@ -214,9 +219,23 @@ func (c *cmd) run() error {
 	return nil
 }
 
-func main() {
-	c := command(os.Stdout, os.Args[1:]...)
+// Main executes the pci command reentrantly on Linux.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "pci: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	_ = ctx
+	c := command(ioEnv.Stdout, args...)
 	if err := c.run(); err != nil {
-		log.Fatal(err)
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(ioEnv.Stderr, "pci: %v\n", err)
+		return 1
 	}
+	return 0
 }

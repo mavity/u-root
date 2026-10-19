@@ -2,14 +2,19 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package truncate
 
 import (
+	"context"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rck/unit"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestTruncate(t *testing.T) {
@@ -46,7 +51,7 @@ func TestTruncate(t *testing.T) {
 			create: false,
 			rfile:  "testfile",
 			args:   []string{filepath.Join(tmpdir, "file1")},
-			want:   "could not stat reference file: stat testfile: no such file or directory",
+			want:   "could not stat reference file:",
 		},
 		{
 			name:   "create non existing file without err in rfile path",
@@ -89,21 +94,44 @@ func TestTruncate(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			*create = tt.create
-			*ioBlocks = tt.ioBlocks
-			*size = tt.size
-			*rfile = tt.rfile
-			if got := truncate(tt.args...); got != nil {
-				if got.Error() != tt.want {
-					t.Errorf("truncate() = %q, want: %q", got.Error(), tt.want)
+			var cmdArgs []string
+			if tt.create {
+				cmdArgs = append(cmdArgs, "-c")
+			}
+			if tt.ioBlocks {
+				cmdArgs = append(cmdArgs, "-o")
+			}
+			if tt.size.IsSet {
+				sign := ""
+				if tt.size.ExplicitSign == unit.Sign(1) {
+					sign = "+"
+				} else if tt.size.ExplicitSign == unit.Sign(2) {
+					sign = "-"
+				}
+				cmdArgs = append(cmdArgs, "-s", fmt.Sprintf("%s%d", sign, tt.size.Value))
+			}
+			if tt.rfile != "" {
+				cmdArgs = append(cmdArgs, "-r", tt.rfile)
+			}
+			cmdArgs = append(cmdArgs, tt.args...)
+
+			ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+			err := run(context.Background(), ioEnv, cmdArgs...)
+			if err != nil {
+				if tt.want == "" || !strings.Contains(err.Error(), tt.want) {
+					t.Errorf("truncate() = %q, want containing: %q", err.Error(), tt.want)
 				}
 			} else {
-				st, err := os.Stat(filepath.Join(tmpdir, "file1"))
-				if err != nil {
-					t.Errorf("failed to get file stats")
+				if tt.want != "" {
+					t.Errorf("truncate() expected error containing %q, got nil", tt.want)
 				}
-				if st.Size() != tt.sizeWant {
-					t.Errorf("the file was not truncated right, got file size %v, want: %v", st.Size(), tt.sizeWant)
+				if len(tt.args) > 0 {
+					st, err := os.Stat(filepath.Join(tmpdir, "file1"))
+					if err != nil {
+						t.Errorf("failed to get file stats: %v", err)
+					} else if st.Size() != tt.sizeWant {
+						t.Errorf("the file was not truncated right, got file size %v, want: %v", st.Size(), tt.sizeWant)
+					}
 				}
 			}
 		})

@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package netcat
 
 import (
 	"bufio"

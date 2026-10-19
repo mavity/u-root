@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package mkdir
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestMkdir(t *testing.T) {
@@ -121,7 +124,8 @@ func TestMkdir(t *testing.T) {
 			ca = append(ca, tt.args...)
 			var stdout bytes.Buffer
 
-			err := mkdir(&stdout, io.Discard, ca)
+			ioEnv := core.IO{Stdout: &stdout, Stderr: io.Discard}
+			err := mkdir(context.Background(), ioEnv, ca...)
 			if !errors.Is(err, tt.err) {
 				t.Fatalf("expected %v, got %v", tt.err, err)
 			}
@@ -138,7 +142,11 @@ func TestMkdir(t *testing.T) {
 				for _, name := range tt.args {
 					if stat, err := os.Stat(name); err == nil {
 						if stat.Mode().String() != tt.wantMode {
-							t.Errorf("Mode = '%v', want: '%v'", stat.Mode().String(), tt.wantMode)
+							// Windows does not support POSIX permission bits or sticky/setuid/setgid bits.
+							// On non-windows platforms, require exact mode match.
+							if filepath.Separator == '/' && stat.Mode().String() != tt.wantMode {
+								t.Errorf("Mode = '%v', want: '%v'", stat.Mode().String(), tt.wantMode)
+							}
 						}
 					}
 				}

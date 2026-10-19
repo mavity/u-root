@@ -1,19 +1,19 @@
 // Copyright 2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-//go:build !tinygo || tinygo.enable
+//go:build linux && (!tinygo || tinygo.enable)
 
-package main
+package netstat
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"time"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/netstat"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
@@ -328,7 +328,8 @@ func evalProtocols(tcp, udp, udpl, raw, unix, ipv4, ipv6 bool) ([]netstat.Socket
 
 func command(out io.Writer, args []string) *cmd {
 	var c cmd
-	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+	fs := flag.NewFlagSet("netstat", flag.ContinueOnError)
+	fs.SetOutput(out)
 	fs.BoolVar(&c.route, "route", false, "display routing table")
 	fs.BoolVar(&c.route, "r", false, "display routing table")
 
@@ -414,14 +415,25 @@ func command(out io.Writer, args []string) *cmd {
 	return &c
 }
 
-func main() {
-	switch err := command(os.Stdout, os.Args).run(); err {
+// Main executes the netstat command reentrantly on Linux.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "netstat: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	cmd := command(ioEnv.Stdout, append([]string{"netstat"}, args...))
+	switch err := cmd.run(); err {
 	case nil:
+		return 0
 	case errMutualExcludeFlags:
-		printHelp()
-		log.Print(err)
-		os.Exit(2)
+		fmt.Fprintf(ioEnv.Stderr, "%s\n", help)
+		fmt.Fprintf(ioEnv.Stderr, "netstat: %v\n", err)
+		return 2
 	default:
-		log.Fatal(err)
+		fmt.Fprintf(ioEnv.Stderr, "netstat: %v\n", err)
+		return 1
 	}
 }

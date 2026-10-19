@@ -13,7 +13,7 @@
 //	-name: glob to match against file name
 //	-regex: regular expression to match against file name
 //	-l: long listing. It's not very good, yet, but it's useful enough.
-package main
+package findcmd
 
 import (
 	"context"
@@ -25,6 +25,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/find"
 )
 
@@ -87,11 +88,11 @@ func reorderArgs(args []string) []string {
 	return newArgs
 }
 
-func command(stdout, stderr io.Writer, args []string) (*cmd, error) {
+func command(ioEnv core.IO, args ...string) (*cmd, error) {
 	var f flags
 
 	fs := flag.NewFlagSet("find", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs.SetOutput(ioEnv.Stderr)
 
 	fs.StringVar(&f.fileType, "type", "", "file type")
 	fs.StringVar(&f.name, "name", "", "glob for name")
@@ -115,8 +116,8 @@ func command(stdout, stderr io.Writer, args []string) (*cmd, error) {
 	}
 
 	c := &cmd{
-		stdout: stdout,
-		stderr: stderr,
+		stdout: ioEnv.Stdout,
+		stderr: ioEnv.Stderr,
 		args:   fs.Args(),
 		flags:  f,
 	}
@@ -133,7 +134,7 @@ func command(stdout, stderr io.Writer, args []string) (*cmd, error) {
 		"b":         os.ModeDevice,
 	}
 
-	root := c.args[0]
+	root := ioEnv.ResolvePath(c.args[0])
 
 	c.opts = []find.Set{
 		find.WithRoot(root),
@@ -183,30 +184,67 @@ func command(stdout, stderr io.Writer, args []string) (*cmd, error) {
 	return c, nil
 }
 
-func (c *cmd) run() error {
-	names := find.Find(context.Background(), c.opts...)
+func (c *cmd) run(ctx context.Context, ioEnv core.IO) error {
+	names := find.Find(ctx, c.opts...)
+
+	rootPrefix := ioEnv.ResolvePath(c.args[0])
+	origRoot := c.args[0]
 
 	for l := range names {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
 		if l.Err != nil {
 			fmt.Fprintf(c.stderr, "%s: %v\n", l.Name, l.Err)
 			continue
 		}
+
+		displayName := l.Name
+		if rootPrefix != origRoot && strings.HasPrefix(l.Name, rootPrefix) {
+			rel := strings.TrimPrefix(l.Name, rootPrefix)
+			rel = strings.TrimPrefix(rel, string(os.PathSeparator))
+			if rel == "" {
+				displayName = origRoot
+			} else if origRoot == "." {
+				displayName = rel
+			} else {
+				displayName = origRoot + string(os.PathSeparator) + rel
+			}
+		}
+
 		if c.long {
 			fmt.Fprintf(c.stdout, "%s\n", l)
 			continue
 		}
-		fmt.Fprintf(c.stdout, "%s\n", l.Name)
+		fmt.Fprintf(c.stdout, "%s\n", displayName)
 	}
 
 	return nil
 }
 
-func main() {
-	c, err := command(os.Stdout, os.Stderr, os.Args[1:])
+// Main runs the find command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "find: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	c, err := command(ioEnv, args...)
 	if err != nil {
-		log.Fatal(err)
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "find: %v\n", err)
+		}
+		return 1
 	}
-	if err := c.run(); err != nil {
-		log.Fatal(err)
+
+	if err := c.run(ctx, ioEnv); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "find: %v\n", err)
+		return 1
 	}
+	return 0
 }

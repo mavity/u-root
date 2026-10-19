@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package tail
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ func tempFile(t *testing.T, content string) *os.File {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = f.Close() })
 
 	_, err = f.WriteString(content)
 	if err != nil {
@@ -34,8 +36,9 @@ func TestTailReadBackwards(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	defer input.Close()
 	output := &bytes.Buffer{}
-	err = readLastLinesBackwards(input, output, 2)
+	err = readLastLinesBackwards(context.Background(), input, output, 2)
 	if err != nil {
 		t.Error(err)
 	}
@@ -60,8 +63,9 @@ func TestTailReadFromBeginning(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+	defer input.Close()
 	output := &bytes.Buffer{}
-	err = readLastLinesFromBeginning(input, output, 3)
+	err = readLastLinesFromBeginning(context.Background(), input, output, 3)
 	if err != nil {
 		t.Error(err)
 	}
@@ -159,12 +163,13 @@ func TestTailFollow(t *testing.T) {
 	}
 
 	go func() {
-		run(f, sw, true, 10, 100*time.Millisecond, nil)
+		_ = run(f, sw, true, 10, 100*time.Millisecond, nil)
 	}()
 	ff, err := os.OpenFile(f.Name(), os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatalf("can't open temp file: %v", err)
 	}
+	defer ff.Close()
 
 	// wait a bit before writing to file
 	time.Sleep(300 * time.Millisecond)

@@ -11,20 +11,20 @@
 // Description:
 //
 //	MODE is a three character octal value or a string like a=rwx
-package main
+package chmod
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 
-	"github.com/u-root/u-root/pkg/uroot/util"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 const (
@@ -34,25 +34,12 @@ const (
 
 var errBadUsage = errors.New(usage)
 
-func init() {
-	flag.Usage = util.Usage(flag.Usage, usage)
-}
-
-type cmd struct {
-	stderr    io.Writer
-	reference string
+type flags struct {
 	recursive bool
+	reference string
 }
 
-func command(stderr io.Writer, recursive bool, reference string) *cmd {
-	return &cmd{
-		stderr:    stderr,
-		recursive: recursive,
-		reference: reference,
-	}
-}
-
-func changeMode(path string, mode os.FileMode, octval uint64, mask uint64) error {
+func changeMode(path string, mode os.FileMode, octval uint64, mask uint64, operator string) error {
 	// A special value for mask means the mode is fully described
 	if mask == special {
 		if err := os.Chmod(path, mode); err != nil {
@@ -61,13 +48,23 @@ func changeMode(path string, mode os.FileMode, octval uint64, mask uint64) error
 		return nil
 	}
 
-	var info os.FileInfo
 	info, err := os.Stat(path)
 	if err != nil {
 		return err
 	}
-	mode = info.Mode() & os.FileMode(mask)
-	mode = mode | os.FileMode(octval)
+
+	currentMode := info.Mode()
+
+	switch operator {
+	case "+":
+		mode = currentMode | os.FileMode(octval)
+	case "-":
+		mode = currentMode &^ os.FileMode(octval)
+	case "=":
+		mode = (currentMode & os.FileMode(mask)) | os.FileMode(octval)
+	default:
+		mode = (currentMode & os.FileMode(mask)) | os.FileMode(octval)
+	}
 
 	if err := os.Chmod(path, mode); err != nil {
 		return err
@@ -75,30 +72,36 @@ func changeMode(path string, mode os.FileMode, octval uint64, mask uint64) error
 	return nil
 }
 
-func calculateMode(modeString string) (mode os.FileMode, octval uint64, mask uint64, err error) {
+func calculateMode(modeString string) (mode os.FileMode, octval uint64, mask uint64, operator string, err error) {
 	octval, err = strconv.ParseUint(modeString, 8, 32)
 	if err == nil {
 		if octval > 0o777 {
-			return mode, octval, mask, fmt.Errorf("%w: invalid octal value %0o. Value should be less than or equal to 0777", strconv.ErrRange, octval)
+			return mode, octval, mask, operator, fmt.Errorf("%w: invalid octal value %0o. Value should be less than or equal to 0777", strconv.ErrRange, octval)
 		}
-		// a fully described octal mode was supplied, signal that with a special value for mask
 		mask = special
 		mode = os.FileMode(octval)
+		operator = "="
 		return
 	}
 
+	// Try with user/group specified first
 	reMode := regexp.MustCompile("^([ugoa]+)([-+=])(.*)")
 	m := reMode.FindStringSubmatch(modeString)
-	// Test for mode strings with invalid characters.
-	// This can't be done in the first regexp: if the match for m[3] is restricted to [rwx]*,
-	// `a=9` and `a=` would be indistinguishable: m[3] would be empty.
-	// `a=` is a valid (but destructive) operation. Do not turn a typo into that.
-	reMode = regexp.MustCompile("^[rwx]*$")
-	if len(m) < 3 || !reMode.MatchString(m[3]) {
-		return mode, octval, mask, fmt.Errorf("%w:unable to decode mode %q. Please use an octal value or a valid mode string", strconv.ErrSyntax, modeString)
+
+	// If no match, try without user/group (defaults to 'a' - all)
+	if len(m) == 0 {
+		reMode = regexp.MustCompile("^([-+=])(.*)")
+		m = reMode.FindStringSubmatch(modeString)
+		if len(m) > 0 {
+			m = []string{m[0], "a", m[1], m[2]}
+		}
 	}
 
-	// m[3] is [rwx]{0,3}
+	reMode = regexp.MustCompile("^[rwx]*$")
+	if len(m) < 4 || !reMode.MatchString(m[3]) {
+		return mode, octval, mask, operator, fmt.Errorf("%w:unable to decode mode %q. Please use an octal value or a valid mode string", strconv.ErrSyntax, modeString)
+	}
+
 	var octvalDigit uint64
 	if strings.Contains(m[3], "r") {
 		octvalDigit += 4
@@ -110,108 +113,167 @@ func calculateMode(modeString string) (mode os.FileMode, octval uint64, mask uin
 		octvalDigit++
 	}
 
-	// m[2] is [-+=]
-	operator := m[2]
+	operator = m[2]
 
-	// Use a mask so that we do not overwrite permissions for a user/group that was not specified
-	mask = 0o777
-
-	// For "-", invert octvalDigit before applying the mask
-	if operator == "-" {
-		octvalDigit = 7 - octvalDigit
-	}
-
-	// m[1] is [ugoa]+
 	if strings.Contains(m[1], "o") || strings.Contains(m[1], "a") {
 		octval += octvalDigit
-		mask = mask & 0o770
 	}
 	if strings.Contains(m[1], "g") || strings.Contains(m[1], "a") {
 		octval += octvalDigit << 3
-		mask = mask & 0o707
 	}
 	if strings.Contains(m[1], "u") || strings.Contains(m[1], "a") {
 		octval += octvalDigit << 6
-		mask = mask & 0o077
 	}
 
-	// For "+" the mask is superfluous, reset it
-	if operator == "+" {
+	if operator == "=" {
 		mask = 0o777
+		if strings.Contains(m[1], "o") || strings.Contains(m[1], "a") {
+			mask = mask & 0o770
+		}
+		if strings.Contains(m[1], "g") || strings.Contains(m[1], "a") {
+			mask = mask & 0o707
+		}
+		if strings.Contains(m[1], "u") || strings.Contains(m[1], "a") {
+			mask = mask & 0o077
+		}
+
+		if strings.Contains(m[1], "a") {
+			mask = special
+			mode = os.FileMode(octval)
+		}
 	}
 
-	// The mode is fully described, signal that with a special value for mask
-	if operator == "=" && strings.Contains(m[1], "a") {
-		mask = special
-		mode = os.FileMode(octval)
-	}
-	return mode, octval, mask, nil
+	return mode, octval, mask, operator, nil
 }
 
-func (c *cmd) run(args ...string) error {
-	var mode os.FileMode
-	if len(args) < 1 {
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var f flags
+
+	// Parse arguments manually to handle mode strings like -rwx, +x, etc.
+	var parsedArgs []string
+	var i int
+	for i = 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			i++
+			break
+		}
+		if arg == "-recursive" || arg == "--recursive" || arg == "-R" {
+			f.recursive = true
+			continue
+		}
+		if arg == "-reference" || arg == "--reference" {
+			if i+1 < len(args) {
+				f.reference = args[i+1]
+				i++
+				continue
+			}
+			return fmt.Errorf("flag needs an argument: %s", arg)
+		}
+		if strings.HasPrefix(arg, "-reference=") || strings.HasPrefix(arg, "--reference=") {
+			f.reference = strings.SplitN(arg, "=", 2)[1]
+			continue
+		}
+		// If it starts with - but contains r, w, or x, treat as mode operand
+		if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
+			if strings.ContainsAny(arg[1:], "rwx") || arg == "-" {
+				parsedArgs = append(parsedArgs, arg)
+				i++
+				break
+			}
+		}
+		parsedArgs = append(parsedArgs, arg)
+		i++
+		break
+	}
+	for ; i < len(args); i++ {
+		parsedArgs = append(parsedArgs, args[i])
+	}
+
+	if len(parsedArgs) < 1 {
 		return errBadUsage
 	}
 
-	if len(args) < 2 && c.reference == "" {
+	if len(parsedArgs) < 2 && f.reference == "" {
 		return errBadUsage
 	}
 
 	var (
+		mode         os.FileMode
 		octval, mask uint64
+		operator     string
 		fileList     []string
 	)
 
-	if c.reference != "" {
-		fi, err := os.Stat(c.reference)
+	if f.reference != "" {
+		refPath := ioEnv.ResolvePath(f.reference)
+		fi, err := os.Stat(refPath)
 		if err != nil {
 			return fmt.Errorf("bad reference file: %w", err)
 		}
 		mask = special
 		mode = fi.Mode()
-		fileList = args
+		operator = "="
+		fileList = parsedArgs
 	} else {
 		var err error
-		if mode, octval, mask, err = calculateMode(args[0]); err != nil {
+		if mode, octval, mask, operator, err = calculateMode(parsedArgs[0]); err != nil {
 			return err
 		}
-		fileList = args[1:]
+		fileList = parsedArgs[1:]
 	}
 
 	var finalErr error
 
 	for _, name := range fileList {
-		if c.recursive {
-			err := filepath.Walk(name, func(path string, _ os.FileInfo, err error) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		resolvedName := ioEnv.ResolvePath(name)
+		if f.recursive {
+			err := filepath.Walk(resolvedName, func(p string, _ os.FileInfo, err error) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
 				if err != nil {
 					return err
 				}
-				err = changeMode(path, mode, octval, mask)
-				return err
+				return changeMode(p, mode, octval, mask, operator)
 			})
 			if err != nil {
 				finalErr = err
-				fmt.Fprintln(c.stderr, err)
+				fmt.Fprintln(ioEnv.Stderr, err)
 			}
 		} else {
-			err := changeMode(name, mode, octval, mask)
+			err := changeMode(resolvedName, mode, octval, mask, operator)
 			if err != nil {
 				finalErr = err
-				fmt.Fprintln(c.stderr, err)
+				fmt.Fprintln(ioEnv.Stderr, err)
 			}
 		}
 	}
 	return finalErr
 }
 
-func main() {
-	var (
-		recursive = flag.Bool("recursive", false, "do changes recursively")
-		reference = flag.String("reference", "", "use mode from reference file")
-	)
-	flag.Parse()
-	if err := command(os.Stderr, *recursive, *reference).run(flag.Args()...); err != nil {
-		os.Exit(1)
+// Main runs the chmod command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "chmod: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "chmod: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

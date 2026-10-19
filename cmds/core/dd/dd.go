@@ -34,19 +34,21 @@
 //	Because UTF-8 clashes with block-oriented copying, `conv=lcase` and
 //	`conv=ucase` will not be supported. Additionally, research showed these
 //	arguments are rarely useful. Use tr instead.
-package main
+package dd
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"os"
 	"strings"
 
 	"github.com/rck/unit"
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/progress"
 )
 
@@ -69,12 +71,21 @@ var flagMap = map[string]bitClearAndSet{
 var allowedFlags = os.O_TRUNC | os.O_SYNC
 
 func dd(r io.Reader, w io.Writer, inBufSize, outBufSize int64, bytesWritten *int64) error {
+	return ddWithCtx(context.Background(), r, w, inBufSize, outBufSize, bytesWritten)
+}
+
+func ddWithCtx(ctx context.Context, r io.Reader, w io.Writer, inBufSize, outBufSize int64, bytesWritten *int64) error {
 	if inBufSize == 0 {
 		return fmt.Errorf("inBufSize is not allowed to be zero")
 	}
 	// There is an optimization in the Go runtime for zero-copy,
 	// which we can use when inBufSize == outBufSize.
 	for inBufSize == outBufSize {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		amt, err := io.CopyN(w, r, inBufSize)
 		*bytesWritten += int64(amt)
 		if err == io.EOF {
@@ -87,6 +98,11 @@ func dd(r io.Reader, w io.Writer, inBufSize, outBufSize int64, bytesWritten *int
 	dat := &bytes.Buffer{}
 
 	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		for int64(dat.Len()) > outBufSize {
 			if _, err := io.CopyN(w, dat, outBufSize); err != nil {
 				return err
@@ -98,9 +114,13 @@ func dd(r io.Reader, w io.Writer, inBufSize, outBufSize int64, bytesWritten *int
 			}
 			return err
 		}
-
 	}
 	for dat.Len() > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if _, err := io.CopyN(w, dat, outBufSize); err != nil && err != io.EOF {
 			return err
 		}
@@ -160,77 +180,166 @@ func (s *sectionReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// inFile opens the input file and seeks to the right position.
-func inFile(stdin io.Reader, name string, inputBytes int64, skip int64, count int64) (io.Reader, error) {
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+func (zeroReader) ReadAt(p []byte, off int64) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+type closerSectionReader struct {
+	*io.SectionReader
+	io.Closer
+}
+
+func (c closerSectionReader) Close() error {
+	if c.Closer != nil {
+		return c.Closer.Close()
+	}
+	return nil
+}
+
+// openInput opens the input stream or file and seeks to the right position.
+func openInput(ioEnv core.IO, name string, inputBytes int64, skip int64, count int64) (io.Reader, io.Closer, error) {
 	maxRead := int64(math.MaxInt64)
 	if count != math.MaxInt64 {
 		maxRead = count * inputBytes
 	}
 
 	if name == "" {
-		// os.Stdin is an io.ReaderAt, but you can't actually call
-		// pread(2) on it, so use the copying section reader.
-		return newStreamSectionReader(stdin, inputBytes*skip, maxRead), nil
+		stdin := ioEnv.Stdin
+		if stdin == nil {
+			stdin = strings.NewReader("")
+		}
+		return newStreamSectionReader(stdin, inputBytes*skip, maxRead), nil, nil
 	}
 
-	in, err := os.Open(name)
-	if err != nil {
-		return nil, fmt.Errorf("error opening input file %q: %w", name, err)
+	if name == "/dev/zero" {
+		return io.NewSectionReader(zeroReader{}, inputBytes*skip, maxRead), nil, nil
 	}
-	return io.NewSectionReader(in, inputBytes*skip, maxRead), nil
+	if name == "/dev/null" {
+		return strings.NewReader(""), nil, nil
+	}
+
+	resolved := ioEnv.ResolvePath(name)
+	in, err := os.Open(resolved)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error opening input file %q: %w", name, err)
+	}
+	return io.NewSectionReader(in, inputBytes*skip, maxRead), in, nil
 }
 
-// outFile opens the output file and seeks to the right position.
-func outFile(stdout io.WriteSeeker, name string, outputBytes int64, seek int64, flags int) (io.Writer, error) {
-	var out io.WriteSeeker
-	var err error
+// openOutput opens the output stream or file and seeks to the right position.
+func openOutput(ioEnv core.IO, name string, outputBytes int64, seek int64, flags int) (io.Writer, io.Closer, error) {
 	if name == "" {
-		out = stdout
-	} else {
-		perm := os.O_CREATE | os.O_WRONLY | (flags & allowedFlags)
-		if out, err = os.OpenFile(name, perm, 0o666); err != nil {
-			return nil, fmt.Errorf("error opening output file %q: %w", name, err)
+		out := ioEnv.Stdout
+		if out == nil {
+			out = io.Discard
 		}
+		if seek*outputBytes != 0 {
+			if ws, ok := out.(io.WriteSeeker); ok {
+				if _, err := ws.Seek(seek*outputBytes, io.SeekCurrent); err != nil {
+					return nil, nil, fmt.Errorf("error seeking output: %w", err)
+				}
+			} else {
+				return nil, nil, fmt.Errorf("cannot seek on non-seekable output stdout")
+			}
+		}
+		return out, nil, nil
+	}
+
+	if name == "/dev/null" {
+		return io.Discard, nil, nil
+	}
+
+	resolved := ioEnv.ResolvePath(name)
+	perm := os.O_CREATE | os.O_WRONLY | (flags & allowedFlags)
+	f, err := os.OpenFile(resolved, perm, 0o666)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error opening output file %q: %w", name, err)
 	}
 	if seek*outputBytes != 0 {
-		if _, err := out.Seek(seek*outputBytes, io.SeekCurrent); err != nil {
-			return nil, fmt.Errorf("error seeking output file: %w", err)
+		if _, err := f.Seek(seek*outputBytes, io.SeekCurrent); err != nil {
+			_ = f.Close()
+			return nil, nil, fmt.Errorf("error seeking output file: %w", err)
 		}
 	}
-	return out, nil
+	return f, f, nil
 }
 
-func usage() {
-	log.Fatal(`Usage: dd [if=file] [of=file] [conv=none|notrunc] [seek=#] [skip=#]
+// inFile provides backward compatibility for existing callers and tests.
+func inFile(stdin io.Reader, name string, inputBytes int64, skip int64, count int64) (io.Reader, error) {
+	r, closer, err := openInput(core.IO{Stdin: stdin}, name, inputBytes, skip, count)
+	if err != nil {
+		return nil, err
+	}
+	if closer != nil {
+		if sr, ok := r.(*io.SectionReader); ok {
+			return closerSectionReader{SectionReader: sr, Closer: closer}, nil
+		}
+	}
+	return r, nil
+}
+
+// outFile provides backward compatibility for existing callers and tests.
+func outFile(stdout io.WriteSeeker, name string, outputBytes int64, seek int64, flags int) (io.Writer, error) {
+	w, _, err := openOutput(core.IO{Stdout: stdout}, name, outputBytes, seek, flags)
+	return w, err
+}
+
+func usageErr() error {
+	return errors.New(`Usage: dd [if=file] [of=file] [conv=none|notrunc] [seek=#] [skip=#]
 			     [count=#] [bs=#] [ibs=#] [obs=#] [status=none|xfer|progress] [oflag=none|sync|dsync]
 		options may also be invoked Go-style as -opt value or -opt=value
 		bs, if specified, overrides ibs and obs`)
 }
 
 func convertArgs(osArgs []string) []string {
-	// EVERYTHING in dd follows x=y. So blindly split and convert.
 	var args []string
 	for _, v := range osArgs {
 		l := strings.SplitN(v, "=", 2)
-
-		// We only fix the exact case for x=y.
 		if len(l) == 2 {
 			l[0] = "-" + l[0]
 		}
-
 		args = append(args, l...)
 	}
 	return args
 }
 
-func main() {
-	if err := run(os.Stdin, os.Stdout, os.Stderr, os.Args[0], os.Args[1:]); err != nil {
-		log.Fatal(err)
+// Main executes the dd command with the given context and I/O environment.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "dd: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := runCmd(ctx, ioEnv, args); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "dd: %v\n", err)
+		return 1
 	}
+	return 0
 }
 
+// run provides backward compatibility for existing tests.
 func run(stdin io.Reader, stdout io.WriteSeeker, stderr io.Writer, name string, args []string) error {
-	f := flag.NewFlagSet(name, flag.ExitOnError)
+	ioEnv := core.IO{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	}
+	return runCmd(context.Background(), ioEnv, args)
+}
+
+func runCmd(ctx context.Context, ioEnv core.IO, args []string) error {
+	f := flag.NewFlagSet("dd", flag.ContinueOnError)
+	f.SetOutput(ioEnv.Stderr)
 
 	var (
 		skip    = f.Int64("skip", 0, "skip N ibs-sized blocks before reading")
@@ -257,15 +366,13 @@ func run(stdin io.Reader, stdout io.WriteSeeker, stderr io.Writer, name string, 
 	f.Var(obs, "obs", "Default output block size")
 	f.Var(bs, "bs", "Default input and output block size")
 
-	// rather than, in essence, recreating all the apparatus of flag.xxxx
-	// with the if= bits, including dup checking, conversion, etc. we just
-	// convert the arguments and then run flag.Parse. Gross, but hey, it
-	// works.
 	args = convertArgs(args)
-	f.Parse(args)
+	if err := f.Parse(args); err != nil {
+		return err
+	}
 
 	if len(f.Args()) > 0 {
-		usage()
+		return usageErr()
 	}
 
 	// Convert conv argument to bit set.
@@ -276,32 +383,31 @@ func run(stdin io.Reader, stdout io.WriteSeeker, stderr io.Writer, name string, 
 				flags &= ^v.clear
 				flags |= v.set
 			} else {
-				log.Printf("unknown argument conv=%s", c)
-				usage()
+				return fmt.Errorf("unknown argument conv=%s", c)
 			}
 		}
 	}
 
 	// Convert oflag argument to bit set.
 	if *oFlag != "none" {
-		for f := range strings.SplitSeq(*oFlag, ",") {
-			if v, ok := flagMap[f]; ok {
+		for fl := range strings.SplitSeq(*oFlag, ",") {
+			if v, ok := flagMap[fl]; ok {
 				flags &= ^v.clear
 				flags |= v.set
 			} else {
-				log.Printf("unknown argument oflag=%s", f)
-				usage()
+				return fmt.Errorf("unknown argument oflag=%s", fl)
 			}
 		}
 	}
 
 	if *status != "none" && *status != "xfer" && *status != "progress" {
-		usage()
+		return usageErr()
 	}
 
 	var bytesWritten int64
-	progress := progress.New(stderr, *status, &bytesWritten)
-	progress.Begin()
+	p := progress.New(ioEnv.Stderr, *status, &bytesWritten)
+	p.Begin()
+	defer p.End()
 
 	// bs = both 'ibs' and 'obs' (IEEE Std 1003.1 - 2013)
 	if bs.IsSet {
@@ -309,18 +415,21 @@ func run(stdin io.Reader, stdout io.WriteSeeker, stderr io.Writer, name string, 
 		obs = bs
 	}
 
-	in, err := inFile(stdin, *inName, ibs.Value, *skip, *count)
+	in, inCloser, err := openInput(ioEnv, *inName, ibs.Value, *skip, *count)
 	if err != nil {
 		return err
 	}
-	out, err := outFile(stdout, *outName, obs.Value, *seek, flags)
-	if err != nil {
-		return err
-	}
-	if err := dd(in, out, ibs.Value, obs.Value, &bytesWritten); err != nil {
-		return err
+	if inCloser != nil {
+		defer inCloser.Close()
 	}
 
-	progress.End()
-	return nil
+	out, outCloser, err := openOutput(ioEnv, *outName, obs.Value, *seek, flags)
+	if err != nil {
+		return err
+	}
+	if outCloser != nil {
+		defer outCloser.Close()
+	}
+
+	return ddWithCtx(ctx, in, out, ibs.Value, obs.Value, &bytesWritten)
 }

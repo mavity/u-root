@@ -1,25 +1,28 @@
-// Copyright 2018-2020 the u-root Authors. All rights reserved
+// Copyright 2018-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build (!tinygo || tinygo.enable) && !windows
+//go:build (!tinygo || tinygo.enable) && !wasip1
 
-package main
+package sshd
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"math"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/mdlayher/vsock"
 	"github.com/pkg/sftp"
-	"github.com/u-root/u-root/pkg/pty"
+	"github.com/u-root/u-root/pkg/core"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -41,33 +44,20 @@ type (
 	}
 )
 
-var (
-	debug   = flag.Bool("d", false, "Enable debug prints")
-	keys    = flag.String("keys", "authorized_keys", "Path to the authorized_keys file")
-	privkey = flag.String("privatekey", "id_rsa", "Path of private key")
-	network = flag.String("net", "tcp", "network to listen on")
-	ip      = flag.String("ip", "0.0.0.0", "ip address to listen on")
-	port    = flag.String("port", "2022", "port to listen on")
-	dprintf = func(string, ...any) {}
-)
+var dprintf = func(string, ...any) {}
 
 // start a command
-// TODO: use /etc/passwd, but the Go support for that is incomplete
-func runCommand(c ssh.Channel, p *pty.Pty, cmd string, args ...string) error {
+func runCommand(c ssh.Channel, p *ptySession, cmd string, args ...string) error {
 	var ps *os.ProcessState
+	var err error
 	defer c.Close()
 
 	if p != nil {
-		log.Printf("Executing PTY command %s %v", cmd, args)
-		p.Command(cmd, args...)
-		if err := p.C.Start(); err != nil {
-			dprintf("Failed to execute: %v", err)
+		ps, err = p.runCommand(c, cmd, args...)
+		if err != nil {
+			dprintf("Failed to execute PTY: %v", err)
 			return err
 		}
-		defer p.C.Wait()
-		go io.Copy(p.Ptm, c)
-		go io.Copy(c, p.Ptm)
-		ps, _ = p.C.Process.Wait()
 	} else {
 		e := exec.Command(cmd, args...)
 		e.Stdin, e.Stdout, e.Stderr = c, c, c
@@ -81,12 +71,7 @@ func runCommand(c ssh.Channel, p *pty.Pty, cmd string, args ...string) error {
 		ps = e.ProcessState
 	}
 
-	// TODO(bluecmd): If somebody wants we can send exit-signal to return
-	// information about signal termination, but leave it until somebody needs
-	// it.
-	// if ws.Signaled() {
-	// }
-	if ps.Exited() {
+	if ps != nil && ps.Exited() {
 		code := uint32(ps.ExitCode())
 		dprintf("Exit status %v", code)
 		c.SendRequest("exit-status", false, ssh.Marshal(exitStatusReq{code}))
@@ -94,38 +79,12 @@ func runCommand(c ssh.Channel, p *pty.Pty, cmd string, args ...string) error {
 	return nil
 }
 
-func newPTY(b []byte) (*pty.Pty, error) {
-	ptyReq := &ptyReq{}
-	err := ssh.Unmarshal(b, ptyReq)
-	dprintf("newPTY: %q", ptyReq)
-	if err != nil {
-		return nil, err
-	}
-	p, err := pty.New()
-	if err != nil {
-		return nil, err
-	}
-	ws, err := p.TTY.GetWinSize()
-	if err != nil {
-		return nil, err
-	}
-	ws.Row = uint16(ptyReq.Row)
-	ws.Ypixel = uint16(ptyReq.Ypixel)
-	ws.Col = uint16(ptyReq.Col)
-	ws.Xpixel = uint16(ptyReq.Xpixel)
-	dprintf("newPTY: Set winsizes to %v", ws)
-	if err := p.TTY.SetWinSize(ws); err != nil {
-		return nil, err
-	}
-	dprintf("newPTY: set TERM to %q", ptyReq.TERM)
-	if err := os.Setenv("TERM", ptyReq.TERM); err != nil {
-		return nil, err
-	}
-	return p, nil
-}
-
 func handleSftp(req *ssh.Request, channel ssh.Channel) error {
-	s, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory("/"))
+	workDir := "/"
+	if cur, err := os.Getwd(); err == nil {
+		workDir = cur
+	}
+	s, err := sftp.NewServer(channel, sftp.WithServerWorkingDirectory(workDir))
 	if err != nil {
 		req.Reply(false, nil)
 		return err
@@ -136,13 +95,6 @@ func handleSftp(req *ssh.Request, channel ssh.Channel) error {
 	}
 
 	req.Reply(true, nil)
-
-	// Need to tell the client that the operations was a success (0) and
-	// kill the connection by any means necessary.  You may see stuff like
-	// "read failed... Broken pipe", but that's OK!  (probably).
-	//
-	// An openssh server will send a msgChannelEOF (96),
-	// msgChannelRequest(exit-status) (98), and then msgChannelClose (97).
 	channel.CloseWrite() // EOF
 	channel.SendRequest("exit-status", false, ssh.Marshal(exitStatusReq{0}))
 	channel.Close()
@@ -151,7 +103,7 @@ func handleSftp(req *ssh.Request, channel ssh.Channel) error {
 }
 
 func session(chans <-chan ssh.NewChannel) {
-	var p *pty.Pty
+	var p *ptySession
 	// Service the incoming Channel channel.
 	for newChannel := range chans {
 		// Channels have a type, depending on the application level
@@ -169,33 +121,30 @@ func session(chans <-chan ssh.NewChannel) {
 		}
 
 		// Sessions have out-of-band requests such as "shell",
-		// "pty-req" and "env".  Here we handle only the
-		// "shell" request.
+		// "pty-req" and "env".
 		go func(in <-chan *ssh.Request) {
 			for req := range in {
 				dprintf("Request %v", req.Type)
 				switch req.Type {
 				case "shell":
-					err := runCommand(channel, p, shell)
-					req.Reply(true, fmt.Appendf(nil, "%v", err))
+					req.Reply(true, nil)
+					go runCommand(channel, p, defaultShell)
 				case "exec":
 					e := &execReq{}
 					if err := ssh.Unmarshal(req.Payload, e); err != nil {
 						log.Printf("sshd: %v", err)
+						req.Reply(false, nil)
 						break
 					}
-					// Execute command using user's shell. This is what OpenSSH does
-					// so it's the least surprising to the user.
-					err := runCommand(channel, p, shell, "-c", e.Command)
-					req.Reply(true, fmt.Appendf(nil, "%v", err))
+					req.Reply(true, nil)
+					go runCommand(channel, p, defaultShell, defaultShellFlag, e.Command)
 				case "pty-req":
-					p, err = newPTY(req.Payload)
+					var err error
+					p, err = newPTYSession(req.Payload)
 					req.Reply(err == nil, nil)
 				case "subsystem":
 					switch {
-					case string(req.Payload[4:]) == "sftp":
-						// This handles the req.Reply
-						// and may close the channel
+					case len(req.Payload) >= 4 && string(req.Payload[4:]) == "sftp":
 						err := handleSftp(req, channel)
 						if err != nil {
 							log.Printf("sshd: sftp: %v", err)
@@ -211,7 +160,6 @@ func session(chans <-chan ssh.NewChannel) {
 				}
 			}
 		}(requests)
-
 	}
 }
 
@@ -224,15 +172,19 @@ type params struct {
 	debug   bool
 }
 
-func parseParams() params {
+func defaultParams() params {
 	return params{
-		debug:   *debug,
-		keys:    *keys,
-		privkey: *privkey,
-		net:     *network,
-		ip:      *ip,
-		port:    *port,
+		debug:   false,
+		keys:    "authorized_keys",
+		privkey: "id_rsa",
+		net:     "tcp",
+		ip:      "0.0.0.0",
+		port:    "2022",
 	}
+}
+
+func parseParams() params {
+	return defaultParams()
 }
 
 func listen(network, ip, port string) (net.Listener, error) {
@@ -262,6 +214,14 @@ func command(p params) *cmd {
 }
 
 func (c *cmd) run() error {
+	return c.runWithCtx(context.Background(), core.IO{
+		Stdin:  os.Stdin,
+		Stdout: os.Stdout,
+		Stderr: os.Stderr,
+	})
+}
+
+func (c *cmd) runWithCtx(ctx context.Context, ioEnv core.IO) error {
 	if c.debug {
 		dprintf = log.Printf
 	}
@@ -287,11 +247,9 @@ func (c *cmd) run() error {
 	// An SSH server is represented by a ServerConfig, which holds
 	// certificate details and handles authentication of ServerConns.
 	config := &ssh.ServerConfig{
-		// Remove to disable public key auth.
 		PublicKeyCallback: func(c ssh.ConnMetadata, pubKey ssh.PublicKey) (*ssh.Permissions, error) {
 			if authorizedKeysMap[string(pubKey.Marshal())] {
 				return &ssh.Permissions{
-					// Record the public key used for authentication.
 					Extensions: map[string]string{
 						"pubkey-fp": ssh.FingerprintSHA256(pubKey),
 					},
@@ -313,21 +271,36 @@ func (c *cmd) run() error {
 
 	config.AddHostKey(private)
 
-	// Once a ServerConfig has been configured, connections can be
-	// accepted.
+	// Once a ServerConfig has been configured, connections can be accepted.
 	listener, err := listen(c.net, c.ip, c.port)
 	if err != nil {
 		return err
 	}
+	defer listener.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-stop:
+		}
+	}()
+
 	for {
 		nConn, err := listener.Accept()
 		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+			}
 			log.Printf("failed to accept incoming connection: %s", err)
-			continue
+			return err
 		}
 
-		// Before use, a handshake must be performed on the incoming
-		// net.Conn.
+		// Before use, a handshake must be performed on the incoming net.Conn.
 		conn, chans, reqs, err := ssh.NewServerConn(nConn, config)
 		if err != nil {
 			log.Printf("failed to handshake: %v", err)
@@ -342,9 +315,44 @@ func (c *cmd) run() error {
 	}
 }
 
-func main() {
-	flag.Parse()
-	if err := command(parseParams()).run(); err != nil {
-		log.Fatal(err)
+// Main runs sshd with the given context, I/O environment, and arguments.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
+	if err := runWithIO(ctx, ioEnv, args...); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(ioEnv.Stderr, "sshd: %v\n", err)
+		return 1
 	}
+	return 0
+}
+
+func runWithIO(ctx context.Context, ioEnv core.IO, args ...string) error {
+	fs := flag.NewFlagSet("sshd", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	p := defaultParams()
+	fs.BoolVar(&p.debug, "d", p.debug, "Enable debug prints")
+	fs.StringVar(&p.keys, "keys", p.keys, "Path to the authorized_keys file")
+	fs.StringVar(&p.privkey, "privatekey", p.privkey, "Path of private key")
+	fs.StringVar(&p.net, "net", p.net, "network to listen on")
+	fs.StringVar(&p.ip, "ip", p.ip, "ip address to listen on")
+	fs.StringVar(&p.port, "port", p.port, "port to listen on")
+
+	parseArgs := args
+	if len(parseArgs) > 0 && !strings.HasPrefix(parseArgs[0], "-") {
+		if parseArgs[0] == "sshd" || filepath.Base(parseArgs[0]) == "sshd" {
+			parseArgs = parseArgs[1:]
+		}
+	}
+
+	if err := fs.Parse(parseArgs); err != nil {
+		return err
+	}
+
+	p.keys = ioEnv.ResolvePath(p.keys)
+	p.privkey = ioEnv.ResolvePath(p.privkey)
+
+	c := command(p)
+	return c.runWithCtx(ctx, ioEnv)
 }

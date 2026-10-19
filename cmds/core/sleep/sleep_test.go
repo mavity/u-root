@@ -2,11 +2,14 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package sleep
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestParseDuration(t *testing.T) {
@@ -25,12 +28,26 @@ func TestParseDuration(t *testing.T) {
 		{"2h45m", time.Duration(2*time.Hour + 45*time.Minute), nil},
 	}
 
-	// Table-driven testing
 	for _, tt := range tests {
 		out, err := parseDuration(tt.in)
 		if out != tt.out || err != tt.err {
 			t.Errorf("parseDuration(%#v) = %v, %v; want %v, %v",
 				tt.in, out, err, tt.out, tt.err)
 		}
+	}
+}
+
+func TestSleep(t *testing.T) {
+	ctx := context.Background()
+	ioEnv := core.IO{}
+	if code := Main(ctx, ioEnv, "1ms"); code != 0 {
+		t.Fatalf("expected 0, got %d", code)
+	}
+
+	// Test cancellation
+	ctxCancel, cancel := context.WithCancel(context.Background())
+	cancel()
+	if code := Main(ctxCancel, ioEnv, "10s"); code != 130 {
+		t.Fatalf("expected 130 on canceled context, got %d", code)
 	}
 }

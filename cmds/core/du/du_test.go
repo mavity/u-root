@@ -1,10 +1,12 @@
 // Copyright 2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-package main
+
+package du
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/testutil"
 )
 
@@ -24,9 +27,10 @@ func TestDU(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.Write(make([]byte, 8096))
+		_ = f.Close()
 
 		cmd := &cmd{stdout: io.Discard}
-		blocks, err := cmd.du(f.Name())
+		blocks, err := cmd.du(context.Background(), f.Name(), f.Name())
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -41,9 +45,10 @@ func TestDU(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		_ = f.Close()
 
 		cmd := &cmd{stdout: io.Discard}
-		blocks, err := cmd.du(f.Name())
+		blocks, err := cmd.du(context.Background(), f.Name(), f.Name())
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -59,15 +64,16 @@ func TestDU(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.Write(make([]byte, 1))
+		_ = f.Close()
 
 		cmd := &cmd{stdout: io.Discard}
-		blocks, err := cmd.du(f.Name())
+		blocks, err := cmd.du(context.Background(), f.Name(), f.Name())
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
 
-		if blocks != 8 {
-			t.Errorf("expected 8 blocks, got %d", blocks)
+		if blocks != 1 {
+			t.Errorf("expected 1 block (512-byte unit), got %d", blocks)
 		}
 	})
 	t.Run("follow symlink", func(t *testing.T) {
@@ -77,6 +83,7 @@ func TestDU(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.Write(make([]byte, 4096))
+		_ = f.Close()
 
 		d2 := t.TempDir()
 		sl := filepath.Join(d2, "symlink")
@@ -86,7 +93,7 @@ func TestDU(t *testing.T) {
 		}
 
 		cmd := &cmd{stdout: io.Discard, followSymlinks: true}
-		blocks, err := cmd.du(sl)
+		blocks, err := cmd.du(context.Background(), sl, sl)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -99,41 +106,31 @@ func TestDU(t *testing.T) {
 
 func TestRun(t *testing.T) {
 	t.Run("empty folder", func(t *testing.T) {
-		currDir, err := os.Getwd()
-		if err != nil {
-			t.Fatal(err)
-		}
-
 		dir := t.TempDir()
-		err = os.Chdir(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer os.Chdir(currDir)
-
 		stdout := &bytes.Buffer{}
-		err = command(stdout, []string{"du"}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard, Dir: dir}
+		err := run(context.Background(), ioEnv)
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
 
-		r := regexp.MustCompile(`^\d\t\.\n$`)
+		r := regexp.MustCompile(`^\d+\t\.\n$`)
 		if !r.MatchString(stdout.String()) {
-			t.Error("expected number tab dot new-line")
+			t.Errorf("expected number tab dot new-line, got %q", stdout.String())
 		}
 	})
 	t.Run("report all files", func(t *testing.T) {
 		dir := prepareDir(t)
 		stdout := &bytes.Buffer{}
-		err := command(stdout, []string{"du", "-a", dir}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, "-a", dir)
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
 		lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 
-		// should print dir, subdir and two files
 		if len(lines) != 4 {
-			t.Errorf("expected file1, file2 and temp dir, but got %d lines", len(lines))
+			t.Errorf("expected file1, file2 and temp dir, but got %d lines: %v", len(lines), lines)
 		}
 	})
 	t.Run("with -k flag", func(t *testing.T) {
@@ -143,9 +140,11 @@ func TestRun(t *testing.T) {
 			t.Fatal(err)
 		}
 		f.Write(make([]byte, 4096))
+		_ = f.Close()
 
 		stdout := &bytes.Buffer{}
-		err = command(stdout, []string{"du", "-k", f.Name()}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard}
+		err = run(context.Background(), ioEnv, "-k", f.Name())
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -157,7 +156,8 @@ func TestRun(t *testing.T) {
 	t.Run("total sum", func(t *testing.T) {
 		dir := prepareDir(t)
 		stdout := &bytes.Buffer{}
-		err := command(stdout, []string{"du", "-s", dir}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, "-s", dir)
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -167,18 +167,20 @@ func TestRun(t *testing.T) {
 		}
 	})
 	t.Run("both -s and -a", func(t *testing.T) {
-		err := command(io.Discard, []string{"du", "-sa"}).run()
+		ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, "-sa")
 		if err == nil {
 			t.Errorf("expected %v, got %v", errUsage, err)
 		}
 	})
 	t.Run("both -H and -L", func(t *testing.T) {
-		err := command(io.Discard, []string{"du", "-HL"}).run()
+		ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, "-HL")
 		if err == nil {
 			t.Errorf("expected %v, got %v", errUsage, err)
 		}
 	})
-	t.Run("symlink with -h", func(t *testing.T) {
+	t.Run("symlink with -H", func(t *testing.T) {
 		dir := prepareDir(t)
 		slDir := filepath.Join(t.TempDir(), "sl")
 		err := os.Symlink(dir, slDir)
@@ -187,17 +189,8 @@ func TestRun(t *testing.T) {
 		}
 
 		stdout := &bytes.Buffer{}
-		err = command(stdout, []string{"du", slDir}).run()
-		if err != nil {
-			t.Fatalf("expected nil got %v", err)
-		}
-		r := parseBlocks(t, stdout)
-		if r != 0 {
-			t.Errorf("expected 0 got %d", r)
-		}
-
-		stdout.Reset()
-		err = command(stdout, []string{"du", "-H", slDir}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard}
+		err = run(context.Background(), ioEnv, "-H", slDir)
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -209,7 +202,8 @@ func TestRun(t *testing.T) {
 		testutil.SkipIfInVMTest(t)
 
 		stdout := &bytes.Buffer{}
-		err := command(stdout, []string{"du", "-s", "testdata/rel-symlinks"}).run()
+		ioEnv := core.IO{Stdout: stdout, Stderr: io.Discard}
+		err := run(context.Background(), ioEnv, "-s", "testdata/rel-symlinks")
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -217,7 +211,7 @@ func TestRun(t *testing.T) {
 		sizeWithoutL := parseBlocks(t, stdout)
 
 		stdout.Reset()
-		err = command(stdout, []string{"du", "-sL", "testdata/rel-symlinks"}).run()
+		err = run(context.Background(), ioEnv, "-sL", "testdata/rel-symlinks")
 		if err != nil {
 			t.Fatalf("expected nil got %v", err)
 		}
@@ -229,10 +223,12 @@ func TestRun(t *testing.T) {
 	})
 }
 
-// parse first line of the output
 func parseBlocks(t *testing.T, stdout *bytes.Buffer) int64 {
 	t.Helper()
 	sp := strings.Fields(stdout.String())
+	if len(sp) == 0 {
+		t.Fatalf("no output in stdout")
+	}
 	r, err := strconv.ParseInt(sp[0], 10, 64)
 	if err != nil {
 		t.Fatal(err)
@@ -250,6 +246,8 @@ func prepareDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	f1.Write(make([]byte, 4096))
+	_ = f1.Close()
+
 	dir1 := filepath.Join(dir, "dir1")
 	err = os.Mkdir(dir1, 0o722)
 	if err != nil {
@@ -260,9 +258,7 @@ func prepareDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	f2.Write(make([]byte, 8012))
-	if err != nil {
-		t.Fatal(err)
-	}
+	_ = f2.Close()
 
 	return dir
 }

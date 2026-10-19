@@ -2,15 +2,20 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+// Package yes implements the yes core utility.
+package yes
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
 	"strings"
+	"syscall"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 func runYes(w io.Writer, count uint64, args ...string) error {
@@ -35,9 +40,45 @@ func runYes(w io.Writer, count uint64, args ...string) error {
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := runYes(os.Stdout, 0, flag.Args()...); err != nil {
-		log.Fatal(err)
+// Main runs the yes command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "yes panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	fs := flag.NewFlagSet("yes", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+
+	line := "y"
+	if len(fs.Args()) > 0 {
+		line = strings.Join(fs.Args(), " ")
+	}
+	outLine := []byte(line + "\n")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return 130
+		default:
+		}
+		if _, err := ioEnv.Stdout.Write(outLine); err != nil {
+			errMsg := strings.ToLower(err.Error())
+			if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) ||
+				strings.Contains(errMsg, "broken pipe") || strings.Contains(errMsg, "pipe is being closed") ||
+				strings.Contains(errMsg, "closed pipe") {
+				return 0
+			}
+			fmt.Fprintf(ioEnv.Stderr, "yes: %v\n", err)
+			return 1
+		}
 	}
 }

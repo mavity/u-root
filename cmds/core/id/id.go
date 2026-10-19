@@ -1,8 +1,6 @@
-// Copyright 2017-2018 the u-root Authors. All rights reserved
+// Copyright 2017-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
-
-//go:build !plan9
 
 // id displays the user id, group id, and groups of the calling process.
 //
@@ -20,20 +18,22 @@
 //	-G, --groups    print all group IDs
 //	-n, --name      print a name instead of a number, for -ugG
 //	-u, --user      print only the effective user ID
-//	-r, --user      print real ID instead of effective ID
-package main
+//	-r, --real      print real ID instead of effective ID
+package id
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
-	"os"
+	"os/user"
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 const (
@@ -95,7 +95,73 @@ func (u *User) Groups() map[int]string {
 
 // GIDName returns the group name for a user's GID
 func (u *User) GIDName() string {
-	return u.Groups()[u.GID()]
+	if name, ok := u.Groups()[u.GID()]; ok {
+		return name
+	}
+	return strconv.Itoa(u.GID())
+}
+
+func newUserFromOS(f *flags, username string) (*User, error) {
+	var currUser *user.User
+	var err error
+	if len(username) == 0 {
+		currUser, err = user.Current()
+	} else {
+		currUser, err = user.Lookup(username)
+		if err != nil {
+			currUser, err = user.LookupId(username)
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("id: unknown user or uid: %s", username)
+	}
+
+	u := &User{groups: make(map[int]string)}
+	u.name = currUser.Username
+	if idx := strings.LastIndex(u.name, `\`); idx >= 0 {
+		u.name = u.name[idx+1:]
+	}
+
+	uid, err := strconv.Atoi(currUser.Uid)
+	if err != nil {
+		uid = sidToID(currUser.Uid, 1000)
+	}
+	u.uid = uid
+
+	gid, err := strconv.Atoi(currUser.Gid)
+	if err != nil {
+		gid = sidToID(currUser.Gid, 1000)
+	}
+	u.gid = gid
+
+	u.groups[gid] = u.name
+	if gids, err := currUser.GroupIds(); err == nil {
+		for _, gStr := range gids {
+			gNum, err := strconv.Atoi(gStr)
+			if err != nil {
+				gNum = sidToID(gStr, gid)
+			}
+			gName := strconv.Itoa(gNum)
+			if grp, err := user.LookupGroupId(gStr); err == nil && grp.Name != "" {
+				gName = grp.Name
+				if idx := strings.LastIndex(gName, `\`); idx >= 0 {
+					gName = gName[idx+1:]
+				}
+			}
+			u.groups[gNum] = gName
+		}
+	}
+	return u, nil
+}
+
+func sidToID(sid string, fallback int) int {
+	parts := strings.Split(sid, "-")
+	if len(parts) > 1 {
+		if rid, err := strconv.Atoi(parts[len(parts)-1]); err == nil && rid > 0 {
+			return rid
+		}
+	}
+	return fallback
 }
 
 // NewUser is a factory method for the User type.
@@ -104,14 +170,13 @@ func NewUser(flags *flags, username string, users *Users, groups *Groups) (*User
 
 	u := &User{groups: make(map[int]string)}
 	if len(username) == 0 { // no username provided, get current
-		if flags.real {
-			u.uid = syscall.Getuid()
-			u.gid = syscall.Getgid()
-		} else {
-			u.uid = syscall.Geteuid()
-			u.gid = syscall.Getegid()
+		pUID, pGID, pGids := getProcessIDs(flags.real)
+		if pUID < 0 {
+			return newUserFromOS(flags, username)
 		}
-		groupsNumbers, _ = syscall.Getgroups()
+		u.uid = pUID
+		u.gid = pGID
+		groupsNumbers = pGids
 		if v, err := users.GetUser(u.uid); err == nil {
 			u.name = v
 		} else {
@@ -133,7 +198,6 @@ func NewUser(flags *flags, username string, users *Users, groups *Groups) (*User
 		}
 		u.gid, _ = users.GetGID(u.uid)
 		groupsNumbers = append([]int{u.gid}, groups.UserGetGIDs(u.name)...)
-		// FIXME: not yet implemented group listing lookups
 	}
 
 	for _, groupNum := range groupsNumbers {
@@ -214,34 +278,69 @@ func run(w io.Writer, name string, f *flags, passwd, group string) error {
 		return errNotOnlyNamesOrIDs
 	}
 
-	users, err := NewUsers(passwd)
-	if err != nil {
-		return fmt.Errorf("id: %w", err)
-	}
-	groups, err := NewGroups(group)
-	if err != nil {
-		return fmt.Errorf("id: %w", err)
+	users, errUsers := NewUsers(passwd)
+	groups, errGroups := NewGroups(group)
+
+	if passwd != passwdFile || group != groupFile {
+		if errUsers != nil {
+			return fmt.Errorf("id: %w", errUsers)
+		}
+		if errGroups != nil {
+			return fmt.Errorf("id: %w", errGroups)
+		}
 	}
 
-	user, err := NewUser(f, name, users, groups)
-	if err != nil {
-		return fmt.Errorf("id: %w", err)
+	var userObj *User
+	var err error
+	if errUsers == nil && errGroups == nil {
+		userObj, err = NewUser(f, name, users, groups)
+	}
+	if userObj == nil {
+		userObj, err = newUserFromOS(f, name)
+		if err != nil {
+			return fmt.Errorf("id: %w", err)
+		}
 	}
 
-	IDCommand(w, f, *user)
+	IDCommand(w, f, *userObj)
 	return nil
 }
 
-func main() {
-	flags := &flags{}
-	flag.BoolVar(&flags.group, "g", false, "print only the effective group ID")
-	flag.BoolVar(&flags.groups, "G", false, "print all group IDs")
-	flag.BoolVar(&flags.name, "n", false, "print a name instead of a number, for -ugG")
-	flag.BoolVar(&flags.user, "u", false, "print only the effective user ID")
-	flag.BoolVar(&flags.real, "r", false, "print real ID instead of effective ID")
+// Main runs the id command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "id: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
 
-	flag.Parse()
-	if err := run(os.Stdout, flag.Arg(0), flags, passwdFile, groupFile); err != nil {
-		log.Fatalf("%v", err)
+	f := &flags{}
+	fs := flag.NewFlagSet("id", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+
+	fs.BoolVar(&f.group, "g", false, "print only the effective group ID")
+	fs.BoolVar(&f.group, "group", false, "print only the effective group ID")
+	fs.BoolVar(&f.groups, "G", false, "print all group IDs")
+	fs.BoolVar(&f.groups, "groups", false, "print all group IDs")
+	fs.BoolVar(&f.name, "n", false, "print a name instead of a number, for -ugG")
+	fs.BoolVar(&f.name, "name", false, "print a name instead of a number, for -ugG")
+	fs.BoolVar(&f.user, "u", false, "print only the effective user ID")
+	fs.BoolVar(&f.user, "user", false, "print only the effective user ID")
+	fs.BoolVar(&f.real, "r", false, "print real ID instead of effective ID")
+	fs.BoolVar(&f.real, "real", false, "print real ID instead of effective ID")
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
 	}
+
+	targetUser := fs.Arg(0)
+	if err := run(ioEnv.Stdout, targetUser, f, passwdFile, groupFile); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "%v\n", err)
+		return 1
+	}
+	return 0
 }

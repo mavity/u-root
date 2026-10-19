@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package base64cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type failer struct{}
@@ -161,3 +164,58 @@ func TestDo(t *testing.T) {
 		})
 	}
 }
+
+func TestMainInvocation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("stdin encode", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdin: strings.NewReader("hello"), Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv)
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if stdout.String() != "aGVsbG8=\n" {
+			t.Errorf("stdout = %q, want %q", stdout.String(), "aGVsbG8=\n")
+		}
+	})
+
+	t.Run("stdin decode", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdin: strings.NewReader("aGVsbG8=\n"), Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "-d")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if stdout.String() != "hello" {
+			t.Errorf("stdout = %q, want %q", stdout.String(), "hello")
+		}
+	})
+
+	t.Run("file input with resolver", func(t *testing.T) {
+		dir := t.TempDir()
+		filePath := filepath.Join(dir, "data.txt")
+		if err := os.WriteFile(filePath, []byte("world"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Dir: dir, Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "data.txt")
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if stdout.String() != "d29ybGQ=\n" {
+			t.Errorf("stdout = %q, want %q", stdout.String(), "d29ybGQ=\n")
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "-help")
+		if code != 0 {
+			t.Fatalf("Main with -help returned %d, want 0", code)
+		}
+	})
+}
+

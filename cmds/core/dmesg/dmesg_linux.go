@@ -11,29 +11,22 @@
 // Options:
 //
 //	-clear: clear the log
-//	-read-clear: clear the log after printing
-package main
+//go:build linux
+
+package dmesg
 
 import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
 
 	"golang.org/x/sys/unix"
 )
 
-func run(out io.Writer, args []string) error {
-	var clr, readClr bool
-
-	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	f.BoolVar(&clr, "clear", false, "Clear the log")
-	f.BoolVar(&readClr, "read-clear", false, "Clear the log after printing")
-	f.Parse(args[1:])
-
+func runDmesg(out io.Writer, clr, readClr bool) error {
 	if clr && readClr {
-		return fmt.Errorf("cannot specify both -clear and -read-clear:%w", os.ErrInvalid)
+		return fmt.Errorf("cannot specify both -clear and -read-clear: %w", os.ErrInvalid)
 	}
 
 	level := unix.SYSLOG_ACTION_READ_ALL
@@ -54,8 +47,15 @@ func run(out io.Writer, args []string) error {
 	return err
 }
 
-func main() {
-	if err := run(os.Stdout, os.Args); err != nil {
-		log.Fatal(err)
+func run(out io.Writer, args []string) error {
+	var clr, readClr bool
+
+	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	f.BoolVar(&clr, "clear", false, "Clear the log")
+	f.BoolVar(&readClr, "read-clear", false, "Clear the log after printing")
+	if err := f.Parse(args[1:]); err != nil {
+		return err
 	}
+
+	return runDmesg(out, clr, readClr)
 }

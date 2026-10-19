@@ -2,22 +2,27 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build (!tinygo || tinygo.enable) && !windows
+//go:build !tinygo || tinygo.enable
 
-package main
+package sshd
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/u-root/u-root/pkg/core"
 	"golang.org/x/crypto/ssh"
 )
 
-func TestParseParmams(t *testing.T) {
+func TestParseParams(t *testing.T) {
 	params := parseParams()
 	if params.debug {
 		t.Error("expected default debug to be false, got true")
@@ -124,6 +129,7 @@ func TestConfigErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer os.Remove(tf.Name())
+		defer tf.Close()
 		tf.WriteString("keys")
 
 		cmd := command(params{
@@ -146,12 +152,13 @@ func TestConfigErrors(t *testing.T) {
 			t.Errorf("expected %v, got %v", os.ErrNotExist, err)
 		}
 	})
-	t.Run("privete key file does have private key", func(t *testing.T) {
+	t.Run("private key file does have private key", func(t *testing.T) {
 		tf, err := os.CreateTemp("", "")
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer os.Remove(tf.Name())
+		defer tf.Close()
 		tf.WriteString("privatekey")
 
 		cmd := command(params{
@@ -174,7 +181,7 @@ func TestConfigErrors(t *testing.T) {
 
 		err := cmd.run()
 		if err == nil {
-			t.Error("expected listen tcp: lookup tcp/port: unknown port, got nil")
+			t.Error("expected listen tcp error, got nil")
 		}
 	})
 }
@@ -183,11 +190,10 @@ func connect(t *testing.T, addr string, cfg *ssh.ClientConfig) *ssh.Client {
 	t.Helper()
 	var count int
 	for {
-		if count > 10 {
+		if count > 20 {
 			t.Fatal("can't connect to sshd server")
 		}
 		clt, err := ssh.Dial("tcp", addr, cfg)
-
 		if err == nil {
 			return clt
 		}
@@ -198,15 +204,33 @@ func connect(t *testing.T, addr string, cfg *ssh.ClientConfig) *ssh.Client {
 }
 
 func TestSessionRun(t *testing.T) {
+	// Pick a free dynamic port
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to get free port: %v", err)
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	_ = ln.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	cmd := command(params{
 		privkey: "./testdata/id_rsa",
 		keys:    "./testdata/id_rsa.pub",
 		ip:      "127.0.0.1",
-		port:    "2022",
+		port:    port,
 		debug:   true,
 	})
 
-	go cmd.run()
+	serverDone := make(chan error, 1)
+	go func() {
+		serverDone <- cmd.runWithCtx(ctx, core.IO{
+			Stdin:  os.Stdin,
+			Stdout: os.Stdout,
+			Stderr: os.Stderr,
+		})
+	}()
 
 	pk, err := os.ReadFile("./testdata/id_rsa")
 	if err != nil {
@@ -221,10 +245,11 @@ func TestSessionRun(t *testing.T) {
 	cfg := ssh.ClientConfig{
 		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         time.Second,
+		Timeout:         3 * time.Second,
 	}
 
 	clt := connect(t, net.JoinHostPort(cmd.ip, cmd.port), &cfg)
+	defer clt.Close()
 
 	session, err := clt.NewSession()
 	if err != nil {
@@ -236,22 +261,33 @@ func TestSessionRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("can't pipe stdin: %v", err)
 	}
-	stdin.Close()
+	_ = stdin.Close()
 
 	output, err := session.StdoutPipe()
 	if err != nil {
 		t.Fatalf("can't pipe output: %v", err)
 	}
 
-	session.Run("echo hello u-root")
+	if err := session.Run("echo hello u-root"); err != nil {
+		t.Fatalf("session.Run failed: %v", err)
+	}
 
 	b := make([]byte, 128)
 	n, err := output.Read(b)
-	if err != nil {
+	if err != nil && err != io.EOF {
 		t.Fatalf("can't read output: %v", err)
 	}
 
-	if string(b[:n]) != "hello u-root\n" {
-		t.Errorf("expected hello u-root, got %q", string(b[:n]))
+	got := strings.TrimSpace(string(b[:n]))
+	if got != "hello u-root" {
+		t.Errorf("expected hello u-root, got %q", got)
+	}
+
+	// Cancel context and verify server shuts down
+	cancel()
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Errorf("server did not shut down after context cancellation")
 	}
 }

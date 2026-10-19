@@ -4,28 +4,24 @@
 //go:build !tinygo || tinygo.enable
 
 // netcat creates arbitrary TCP and UDP connections and listens and sends arbitrary data.
-package main
+package netcat
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/netcat"
 	"github.com/u-root/u-root/pkg/ulog"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
-
-	// To build the dependencies of this package with TinyGo, we need to include
-	// the cpuid package, since tinygo does not support the asm code in the
-	// cpuid package. The cpuid package will use the tinygo bridge to get the
-	// CPU information. For further information see
-	// github.com/u-root/cpuid/cpuid_amd64_tinygo_bridge.go
-	_ "github.com/u-root/cpuid"
 )
 
 type flags struct {
@@ -374,10 +370,26 @@ func (c *cmd) connection() (string, string, error) {
 	return network, address, nil
 }
 
-func run(args []string) error {
+type nopWriteCloser struct {
+	io.Writer
+}
+
+func (n nopWriteCloser) Close() error {
+	return nil
+}
+
+func toWriteCloser(w io.Writer) io.WriteCloser {
+	if wc, ok := w.(io.WriteCloser); ok {
+		return wc
+	}
+	return nopWriteCloser{Writer: w}
+}
+
+func runWithIO(ctx context.Context, ioEnv core.IO, args []string) error {
 	var f flags
 
-	fs := flag.NewFlagSet(args[0], flag.ExitOnError)
+	fs := flag.NewFlagSet("netcat", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
 
 	fs.BoolVar(&f.ipv4, "ipv4", false, "Use IPv4 only")
 	fs.BoolVar(&f.ipv4, "4", false, "Use IPv4 only (shorthand)")
@@ -492,20 +504,45 @@ func run(args []string) error {
 	fs.StringVar(&f.sslALPN, "ssl-alpn", "", "List of protocols to send via ALPN")
 
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: %s [options] [network address]\nOptions:\n", args[0])
+		fmt.Fprintf(fs.Output(), "Usage: netcat [options] [network address]\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
-	fs.Parse(unixflag.ArgsToGoArgs(args[1:]))
+	parseArgs := args
+	if len(parseArgs) > 0 && !strings.HasPrefix(parseArgs[0], "-") {
+		if parseArgs[0] == "netcat" || parseArgs[0] == "nc" || filepath.Base(parseArgs[0]) == "netcat" || filepath.Base(parseArgs[0]) == "nc" {
+			parseArgs = parseArgs[1:]
+		}
+	}
+
+	if err := fs.Parse(unixflag.ArgsToGoArgs(parseArgs)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
 
 	config, err := evalParams(fs.Args(), f)
 	if err != nil {
-		log.Fatalf("error: %v", err)
+		return err
 	}
 
-	c, err := command(os.Stdin, &netcat.StdoutWriteCloser{}, os.Stderr, config, flag.Args())
+	stdin := ioEnv.Stdin
+	if stdin == nil {
+		stdin = strings.NewReader("")
+	}
+	stdout := ioEnv.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	stderr := ioEnv.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+
+	c, err := command(stdin, toWriteCloser(stdout), stderr, config, fs.Args())
 	if err != nil {
-		log.Fatalf("error: %v", err)
+		return err
 	}
 
 	network, address, err := c.connection()
@@ -516,6 +553,16 @@ func run(args []string) error {
 	// io.Copy will block until the connection is closed, use a TeeWriteCloser to write to stdout and the output file
 	output := netcat.NewTeeWriteCloser(c.stdout, &c.config.Output)
 
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.stdout.Close()
+		case <-done:
+		}
+	}()
+
 	if c.config.ConnectionMode == netcat.CONNECTION_MODE_LISTEN {
 		return c.listenMode(netcat.NewConcurrentWriteCloser(output), network, address, c.listen)
 	}
@@ -523,8 +570,27 @@ func run(args []string) error {
 	return c.connectMode(output, network, address, c.connect)
 }
 
-func main() {
-	if err := run(os.Args); err != nil {
-		log.Fatalf("error: %v", err)
+func run(args []string) error {
+	ioEnv := core.IO{
+		Stdin:  os.Stdin,
+		Stdout: &netcat.StdoutWriteCloser{},
+		Stderr: os.Stderr,
 	}
+	return runWithIO(context.Background(), ioEnv, args)
+}
+
+// Main executes the netcat command with the given context and virtualized IO.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "netcat: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := runWithIO(ctx, ioEnv, args); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "netcat: %v\n", err)
+		return 1
+	}
+	return 0
 }

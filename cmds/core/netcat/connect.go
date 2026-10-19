@@ -3,7 +3,7 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package netcat
 
 import (
 	"bufio"
@@ -99,6 +99,7 @@ func (c *cmd) connect(output io.WriteCloser, network, address string) error {
 
 	// in send-only mode ignore incoming data
 	if c.config.Misc.SendOnly {
+		wg.Wait()
 		return nil
 	}
 

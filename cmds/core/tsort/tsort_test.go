@@ -2,9 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package tsort
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -16,6 +18,8 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 var errDiskCrashed = errors.New("disk crashed")
@@ -821,3 +825,66 @@ func hasDuplicates(values []string) bool {
 	}
 	return false
 }
+
+func TestMainInvocation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic sort via stdin", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdin: strings.NewReader("a b\nb c\n"), Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv)
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if stdout.String() != "a\nb\nc\n" {
+			t.Errorf("stdout = %q, want %q", stdout.String(), "a\nb\nc\n")
+		}
+	})
+
+	t.Run("cycle returns code 1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdin: strings.NewReader("a b\nb a\n"), Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv)
+		if code != 1 {
+			t.Fatalf("Main returned %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "tsort: cycle in data") {
+			t.Errorf("stderr %q should contain cycle warning", stderr.String())
+		}
+	})
+
+	t.Run("odd data count returns code 1", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdin: strings.NewReader("a b c"), Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv)
+		if code != 1 {
+			t.Fatalf("Main returned %d, want 1", code)
+		}
+		if !strings.Contains(stderr.String(), "odd data count") {
+			t.Errorf("stderr %q should contain odd data count", stderr.String())
+		}
+	})
+
+	t.Run("file input with resolver", func(t *testing.T) {
+		tmp := tempFile(t, "1 2\n2 3\n")
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, tmp)
+		if code != 0 {
+			t.Fatalf("Main returned %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if stdout.String() != "1\n2\n3\n" {
+			t.Errorf("stdout = %q, want %q", stdout.String(), "1\n2\n3\n")
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+		code := Main(ctx, ioEnv, "-help")
+		if code != 0 {
+			t.Fatalf("Main with -help returned %d, want 0", code)
+		}
+	})
+}
+

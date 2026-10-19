@@ -2,22 +2,18 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package truecmd
 
 import (
+	"context"
 	"testing"
 
-	"github.com/u-root/u-root/pkg/testutil"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 // Ensure 0 is returned.
 func TestTrue(t *testing.T) {
-	out, err := testutil.Command(t).CombinedOutput()
-	if err != nil || len(out) != 0 {
-		t.Fatal("Expected no output and no error")
+	if code := Main(context.Background(), core.IO{}); code != 0 {
+		t.Fatalf("expected 0, got %d", code)
 	}
-}
-
-func TestMain(m *testing.M) {
-	testutil.Run(m, main)
 }

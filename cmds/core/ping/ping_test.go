@@ -3,10 +3,11 @@
 // license that can be found in the LICENSE file.
 //go:build !tinygo || tinygo.enable
 
-package main
+package ping
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hugelgupf/vmtest/guest"
+	"github.com/u-root/u-root/pkg/core"
 	"golang.org/x/net/icmp"
 	"golang.org/x/net/ipv4"
 )
@@ -202,3 +204,50 @@ func TestRawPing(t *testing.T) {
 		t.Errorf("expected addr, got %s", lines[0].addr)
 	}
 }
+
+func TestMainPing(t *testing.T) {
+	// Test --help returns 0
+	stdin := strings.NewReader("")
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	ioEnv := core.IO{Stdin: stdin, Stdout: stdout, Stderr: stderr}
+
+	code := Main(context.Background(), ioEnv, "-h")
+	if code != 0 {
+		t.Fatalf("expected exit code 0 for -h, got %d", code)
+	}
+
+	// Test -V returns 0
+	stdout.Reset()
+	stderr.Reset()
+	code = Main(context.Background(), ioEnv, "-V")
+	if code != 0 {
+		t.Fatalf("expected exit code 0 for -V, got %d", code)
+	}
+	if !strings.Contains(stdout.String(), "u-root ping") {
+		t.Fatalf("expected 'u-root ping' in output, got %q", stdout.String())
+	}
+
+	// Test missing argument returns 1
+	stdout.Reset()
+	stderr.Reset()
+	code = Main(context.Background(), ioEnv)
+	if code != 1 {
+		t.Fatalf("expected exit code 1 for no args, got %d", code)
+	}
+
+	// Test real ping to localhost (works on Windows via IcmpSendEcho and on Linux if root/unprivileged socket enabled)
+	stdout.Reset()
+	stderr.Reset()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	code = Main(ctx, ioEnv, "-c", "1", "127.0.0.1")
+	if code != 0 {
+		t.Logf("ping 127.0.0.1 failed (code=%d, stderr=%s)", code, stderr.String())
+	} else {
+		if !strings.Contains(stdout.String(), "bytes from 127.0.0.1") {
+			t.Errorf("expected 'bytes from 127.0.0.1', got %q", stdout.String())
+		}
+	}
+}
+

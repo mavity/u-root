@@ -2,18 +2,17 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package yes
 
 import (
 	"bytes"
+	"context"
+	"io"
 	"testing"
+	"time"
 
-	"github.com/u-root/u-root/pkg/testutil"
+	"github.com/u-root/u-root/pkg/core"
 )
-
-func TestMain(m *testing.M) {
-	testutil.Run(m, main)
-}
 
 func TestYes(t *testing.T) {
 	count := uint64(5)
@@ -48,4 +47,61 @@ func TestYes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainInvocation(t *testing.T) {
+	t.Run("pipe close terminates cleanly", func(t *testing.T) {
+		r, w := io.Pipe()
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: w, Stderr: &stderr}
+
+		done := make(chan int, 1)
+		go func() {
+			done <- Main(context.Background(), ioEnv, "test")
+		}()
+
+		buf := make([]byte, 10)
+		_, _ = r.Read(buf)
+		_ = r.Close()
+
+		select {
+		case code := <-done:
+			if code != 0 {
+				t.Errorf("expected exit code 0 on pipe close, got %d", code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("yes did not terminate after pipe close")
+		}
+	})
+
+	t.Run("context cancellation terminates cleanly", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: io.Discard, Stderr: &stderr}
+
+		done := make(chan int, 1)
+		go func() {
+			done <- Main(ctx, ioEnv)
+		}()
+
+		select {
+		case code := <-done:
+			if code != 130 {
+				t.Errorf("expected exit code 130 on ctx cancel, got %d", code)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("yes did not terminate after ctx cancellation")
+		}
+	})
+
+	t.Run("help flag returns 0", func(t *testing.T) {
+		var stderr bytes.Buffer
+		ioEnv := core.IO{Stdout: io.Discard, Stderr: &stderr}
+		code := Main(context.Background(), ioEnv, "-help")
+		if code != 0 {
+			t.Fatalf("expected 0 on -help, got %d", code)
+		}
+	})
 }

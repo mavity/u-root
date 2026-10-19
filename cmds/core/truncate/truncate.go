@@ -18,15 +18,18 @@
 // Author:
 //
 //	Roland Kammerer <dev.rck@gmail.com>
-package main
+package truncate
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 
 	"github.com/rck/unit"
+	"github.com/u-root/u-root/pkg/core"
+	"github.com/u-root/u-root/pkg/uroot/unixflag"
 	"github.com/u-root/u-root/pkg/uroot/util"
 )
 
@@ -34,53 +37,64 @@ const usage = "truncate [-c] -s size file..."
 
 const ioBlockSize = 512
 
-var (
-	create   = flag.Bool("c", false, "Do not create files.")
-	ioBlocks = flag.Bool("o", false, "Treat SIZE as number of IO blocks instead of bytes.")
-	size     = unit.MustNewUnit(unit.DefaultUnits).MustNewValue(1, unit.None)
-	rfile    = flag.String("r", "", "Reference file for size")
-)
+func run(ctx context.Context, ioEnv core.IO, args ...string) error {
+	var noCreate, ioBlocks bool
+	var rfile string
+	size := unit.MustNewUnit(unit.DefaultUnits).MustNewValue(1, unit.None)
 
-func init() {
-	flag.Var(size, "s", "Size in bytes, prefixes +/- are allowed")
-	flag.Usage = util.Usage(flag.Usage, usage)
-}
+	fs := flag.NewFlagSet("truncate", flag.ContinueOnError)
+	fs.SetOutput(ioEnv.Stderr)
+	fs.BoolVar(&noCreate, "c", false, "Do not create files.")
+	fs.BoolVar(&ioBlocks, "o", false, "Treat SIZE as number of IO blocks instead of bytes.")
+	fs.Var(size, "s", "Size in bytes, prefixes +/- are allowed")
+	fs.StringVar(&rfile, "r", "", "Reference file for size")
+	fs.Usage = util.Usage(fs.Usage, usage)
 
-func truncate(args ...string) error {
-	if !size.IsSet && *rfile == "" {
+	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+		return err
+	}
+
+	if (!size.IsSet && rfile == "") || (size.IsSet && rfile != "") {
 		return fmt.Errorf("you need to specify size via -s <number> or -r <rfile>")
 	}
-	if size.IsSet && *rfile != "" {
-		return fmt.Errorf("you need to specify size via -s <number> or -r <rfile>")
-	}
-	if len(args) == 0 {
+	rest := fs.Args()
+	if len(rest) == 0 {
 		return fmt.Errorf("you need to specify one or more files as argument")
 	}
 
-	for _, fname := range args {
+	for _, fname := range rest {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 
-		var final int64
-		st, err := os.Stat(fname)
-		if os.IsNotExist(err) && !*create {
-			if err = os.WriteFile(fname, []byte{}, 0o644); err != nil {
+		resolved := ioEnv.ResolvePath(fname)
+		st, err := os.Stat(resolved)
+		if os.IsNotExist(err) && !noCreate {
+			if err = os.WriteFile(resolved, []byte{}, 0o644); err != nil {
 				return fmt.Errorf("%w", err)
 			}
-			if st, err = os.Stat(fname); err != nil {
+			if st, err = os.Stat(resolved); err != nil {
 				return fmt.Errorf("could not stat newly created file: %w", err)
 			}
 		}
-		if *rfile != "" {
-			if st, err = os.Stat(*rfile); err != nil {
+		var final int64
+		if rfile != "" {
+			refResolved := ioEnv.ResolvePath(rfile)
+			if st, err = os.Stat(refResolved); err != nil {
 				return fmt.Errorf("could not stat reference file: %w", err)
 			}
 			final = st.Size()
 		} else if size.IsSet {
 			final = size.Value // base case
-			if *ioBlocks {
+			if ioBlocks {
 				final *= ioBlockSize
 			}
 			if size.ExplicitSign != unit.None {
-				final += st.Size() // in case of '-', size.Value is already negative
+				if st != nil {
+					final += st.Size() // in case of '-', size.Value is already negative
+				}
 			}
 			if final < 0 {
 				final = 0
@@ -88,15 +102,25 @@ func truncate(args ...string) error {
 		}
 
 		// intentionally ignore, like GNU truncate
-		os.Truncate(fname, final)
+		_ = os.Truncate(resolved, final)
 	}
 	return nil
 }
 
-func main() {
-	flag.Parse()
-	if err := truncate(flag.Args()...); err != nil {
-		flag.Usage()
-		log.Fatal(err)
+// Main runs the truncate command reentrantly.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "truncate: panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	if err := run(ctx, ioEnv, args...); err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintf(ioEnv.Stderr, "truncate: %v\n", err)
+		}
+		return 1
 	}
+	return 0
 }

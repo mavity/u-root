@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package sort
 
 import (
 	"bytes"
@@ -193,6 +193,7 @@ func TestSortFiles(t *testing.T) {
 	if _, err := file1.WriteString("α\nβ\nγ"); err != nil {
 		t.Fatalf("failed to write into file1: %v", err)
 	}
+	_ = file1.Close()
 	file2, err := os.Create(filepath.Join(tmpDir, "file2"))
 	if err != nil {
 		t.Fatalf("Failed to create tmp file2: %v", err)
@@ -200,6 +201,7 @@ func TestSortFiles(t *testing.T) {
 	if _, err := file2.WriteString("a\nd\nc\n"); err != nil {
 		t.Fatalf("failed to write into file1: %v", err)
 	}
+	_ = file2.Close()
 
 	for _, tt := range []struct {
 		name    string
@@ -252,6 +254,7 @@ func TestSortFiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("failed to create tmp file: %v", err)
 			}
+			defer f.Close()
 			stdout := &bytes.Buffer{}
 			c := command(f, stdout, nil, tt.params, tt.args)
 

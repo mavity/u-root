@@ -1,10 +1,10 @@
-// Copyright 2015-2022 the u-root Authors. All rights reserved
+// Copyright 2015-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build (mips || mips64 || mips64le || mipsle) && !plan9 && !windows
+//go:build (mips || mips64 || mips64le || mipsle) && !plan9 && !windows && !wasip1
 
-package main
+package df
 
 import "golang.org/x/sys/unix"
 

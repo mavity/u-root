@@ -22,7 +22,7 @@
 // Example:
 //
 //	wget -O google.txt http://google.com/
-package main
+package wget
 
 import (
 	"context"
@@ -30,21 +30,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/curl"
 	"github.com/u-root/uio/uio"
-
-	// To build the dependencies of this package with TinyGo, we need to include
-	// the cpuid package, since tinygo does not support the asm code in the
-	// cpuid package. The cpuid package will use the tinygo bridge to get the
-	// CPU information. For further information see
-	// github.com/u-root/cpuid/cpuid_amd64_tinygo_bridge.go
-	_ "github.com/u-root/cpuid"
 )
 
 var errEmptyURL = errors.New("empty url")
@@ -59,23 +53,21 @@ type cmd struct {
 // This code does not process the -- flag specified in the
 // man page, as the command itself does not seem to either.
 func flags(args ...string) (string, string, error) {
-	// -- takes priority over everything else.
-	// flag package does not allow - as a flag.
-	// except, in spite of the docs, wget on linux seems
-	// to ignore --. Great. It's a terrible idea anyway,
-	// unless you really like creating files that start
-	// with -
-	// If at some point one wishes to add -- support,
-	// the slices package is a good place to start.
-
 	if len(args) == 0 {
 		return "", "", errEmptyURL
 	}
 
-	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	f := flag.NewFlagSet("wget", flag.ContinueOnError)
 	outPath := f.String("O", "", "output file")
 
-	if err := f.Parse(args[1:]); err != nil {
+	parseArgs := args
+	if len(parseArgs) > 0 && !strings.HasPrefix(parseArgs[0], "-") {
+		if parseArgs[0] == "wget" || parseArgs[0] == "" || filepath.Base(parseArgs[0]) == "wget" {
+			parseArgs = parseArgs[1:]
+		}
+	}
+
+	if err := f.Parse(parseArgs); err != nil {
 		return "", "", err
 	}
 
@@ -106,9 +98,7 @@ func command(args ...string) (*cmd, error) {
 	}, nil
 }
 
-func (c *cmd) run() error {
-	log.SetPrefix("wget: ")
-
+func (c *cmd) runWithIO(ctx context.Context, ioEnv core.IO) error {
 	if c.url == "" {
 		return errEmptyURL
 	}
@@ -131,27 +121,59 @@ func (c *cmd) run() error {
 		"file":  &curl.LocalFileClient{},
 	}
 
-	reader, err := schemes.FetchWithoutCache(context.Background(), parsedURL)
+	reader, err := schemes.FetchWithoutCache(ctx, parsedURL)
 	if err != nil {
 		return fmt.Errorf("failed to download %v: %w", c.url, err)
 	}
 
 	if c.outputPath == "-" {
-		_, err := io.Copy(os.Stdout, reader)
+		out := ioEnv.Stdout
+		if out == nil {
+			out = os.Stdout
+		}
+		_, err := io.Copy(out, reader)
 		return err
 	}
 
-	if err := uio.ReadIntoFile(reader, c.outputPath); err != nil {
+	targetPath := ioEnv.ResolvePath(c.outputPath)
+	if err := uio.ReadIntoFile(reader, targetPath); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func usage() {
-	log.Printf("Usage: %s [ARGS] URL\n", os.Args[0])
-	flag.PrintDefaults()
-	os.Exit(2)
+func (c *cmd) run() error {
+	return c.runWithIO(context.Background(), core.IO{Stdout: os.Stdout, Stderr: os.Stderr})
+}
+
+// Main executes the wget command with the given context and virtualized IO.
+func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(ioEnv.Stderr, "wget: internal panic: %v\n", r)
+			exitCode = 1
+		}
+	}()
+
+	c, err := command(args...)
+	if err != nil {
+		if errors.Is(err, errEmptyURL) {
+			fmt.Fprintf(ioEnv.Stderr, "Usage: wget [ARGS] URL\n")
+			return 2
+		}
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		fmt.Fprintf(ioEnv.Stderr, "wget: %v\n", err)
+		return 1
+	}
+
+	if err := c.runWithIO(ctx, ioEnv); err != nil {
+		fmt.Fprintf(ioEnv.Stderr, "wget: %v\n", err)
+		return 1
+	}
+	return 0
 }
 
 func defaultOutputPath(urlPath string) string {
@@ -159,17 +181,4 @@ func defaultOutputPath(urlPath string) string {
 		return "index.html"
 	}
 	return path.Base(urlPath)
-}
-
-func main() {
-	c, err := command(os.Args...)
-	if err == nil {
-		err = c.run()
-	}
-	if err != nil {
-		if errors.Is(err, errEmptyURL) {
-			usage()
-		}
-		log.Fatal(err)
-	}
 }
