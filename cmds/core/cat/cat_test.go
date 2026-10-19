@@ -8,11 +8,13 @@ package cat
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/iotest"
 
@@ -180,3 +182,113 @@ func TestCatMain(t *testing.T) {
 		t.Fatalf("got %q, want 'hello from cat\\n'", out.String())
 	}
 }
+
+func TestCatReentrancyAndConcurrency(t *testing.T) {
+	tempDir := t.TempDir()
+	for i := 0; i < 50; i++ {
+		p := filepath.Join(tempDir, fmt.Sprintf("file_%d.txt", i))
+		if err := os.WriteFile(p, []byte(fmt.Sprintf("content_%d", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const goroutines = 50
+	errCh := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(id int) {
+			var out, errOut bytes.Buffer
+			ioEnv := core.IO{Stdout: &out, Stderr: &errOut, Dir: tempDir}
+			code := Main(context.Background(), ioEnv, fmt.Sprintf("file_%d.txt", id))
+			if code != 0 {
+				errCh <- fmt.Errorf("goroutine %d exited with code %d: %s", id, code, errOut.String())
+				return
+			}
+			expected := fmt.Sprintf("content_%d", id)
+			if out.String() != expected {
+				errCh <- fmt.Errorf("goroutine %d got %q, want %q", id, out.String(), expected)
+				return
+			}
+			errCh <- nil
+		}(i)
+	}
+	for i := 0; i < goroutines; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCatContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+	code := Main(ctx, ioEnv, "somefile.txt")
+	if code != 130 {
+		t.Fatalf("expected code 130 for cancelled context, got %d", code)
+	}
+}
+
+func TestCatFlagsAndHelp(t *testing.T) {
+	// -h should return 0
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-h")
+		if code != 0 {
+			t.Fatalf("expected code 0 for -h, got %d", code)
+		}
+		if !strings.Contains(errOut.String(), "Usage:") {
+			t.Fatalf("expected usage message in stderr, got: %q", errOut.String())
+		}
+	}
+
+	// -u is an accepted ignored flag
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{
+			Stdin:  strings.NewReader("unbuffered"),
+			Stdout: &out,
+			Stderr: &errOut,
+		}
+		code := Main(context.Background(), ioEnv, "-u")
+		if code != 0 || out.String() != "unbuffered" {
+			t.Fatalf("cat -u failed: code=%d out=%q err=%s", code, out.String(), errOut.String())
+		}
+	}
+
+	// invalid flag should return 1
+	{
+		var out, errOut bytes.Buffer
+		ioEnv := core.IO{Stdout: &out, Stderr: &errOut}
+		code := Main(context.Background(), ioEnv, "-invalid-flag-xyz")
+		if code != 1 {
+			t.Fatalf("expected code 1 for invalid flag, got %d", code)
+		}
+	}
+}
+
+func TestCatStdinAndDash(t *testing.T) {
+	tempDir := t.TempDir()
+	f1 := filepath.Join(tempDir, "f1.txt")
+	f2 := filepath.Join(tempDir, "f2.txt")
+	_ = os.WriteFile(f1, []byte("AAA\n"), 0o644)
+	_ = os.WriteFile(f2, []byte("CCC\n"), 0o644)
+
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{
+		Stdin:  strings.NewReader("BBB\n"),
+		Stdout: &out,
+		Stderr: &errOut,
+		Dir:    tempDir,
+	}
+	code := Main(context.Background(), ioEnv, "f1.txt", "-", "f2.txt")
+	if code != 0 {
+		t.Fatalf("cat f1 - f2 failed: code=%d err=%s", code, errOut.String())
+	}
+	if out.String() != "AAA\nBBB\nCCC\n" {
+		t.Fatalf("got %q, want 'AAA\\nBBB\\nCCC\\n'", out.String())
+	}
+}
+

@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
@@ -39,17 +41,21 @@ func cat(reader io.Reader, writer io.Writer) error {
 }
 
 func run(stdin io.Reader, stdout io.Writer, args ...string) error {
-	return runWithResolve(stdin, stdout, nil, args...)
+	return runWithResolve(context.Background(), stdin, stdout, nil, args...)
 }
 
-func runWithResolve(stdin io.Reader, stdout io.Writer, resolve func(string) string, args ...string) error {
+func runWithResolve(ctx context.Context, stdin io.Reader, stdout io.Writer, resolve func(string) string, args ...string) error {
 	if len(args) == 0 {
 		return cat(stdin, stdout)
 	}
 	for _, file := range args {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
 		if file == "-" {
-			err := cat(stdin, stdout)
-			if err != nil {
+			if err := cat(stdin, stdout); err != nil {
 				return err
 			}
 			continue
@@ -64,7 +70,7 @@ func runWithResolve(stdin io.Reader, stdout io.Writer, resolve func(string) stri
 		}
 		if err := cat(f, stdout); err != nil {
 			f.Close()
-			return fmt.Errorf("failed to concatenate file %s to given writer", f.Name())
+			return fmt.Errorf("failed to concatenate file %s to given writer: %w", f.Name(), err)
 		}
 		f.Close()
 	}
@@ -80,6 +86,13 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
+	parseArgs := args
+	if len(parseArgs) > 0 && !strings.HasPrefix(parseArgs[0], "-") {
+		if parseArgs[0] == "cat" || filepath.Base(parseArgs[0]) == "cat" {
+			parseArgs = parseArgs[1:]
+		}
+	}
+
 	var u bool
 	fs := flag.NewFlagSet("cat", flag.ContinueOnError)
 	fs.SetOutput(ioEnv.Stderr)
@@ -89,7 +102,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		fs.PrintDefaults()
 	}
 
-	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+	if err := fs.Parse(unixflag.ArgsToGoArgs(parseArgs)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
@@ -102,7 +115,10 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	default:
 	}
 
-	if err := runWithResolve(ioEnv.Stdin, ioEnv.Stdout, ioEnv.ResolvePath, fs.Args()...); err != nil {
+	if err := runWithResolve(ctx, ioEnv.Stdin, ioEnv.Stdout, ioEnv.ResolvePath, fs.Args()...); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
 		fmt.Fprintf(ioEnv.Stderr, "cat: %v\n", err)
 		return 1
 	}
