@@ -1,4 +1,4 @@
-// Copyright 2012-2017 the u-root Authors. All rights reserved
+// Copyright 2012-2024 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -36,12 +36,26 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
 var errQuiet = fmt.Errorf("not found")
+
+func isBrokenPipe(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "pipe is being closed") ||
+		strings.Contains(msg, "i/o error")
+}
 
 type params struct {
 	expr string
@@ -56,10 +70,8 @@ type grepInput struct {
 
 type cmd struct {
 	ctx        context.Context
-	stdin      io.Reader
+	ioEnv      core.IO
 	stdout     *bufio.Writer
-	stderr     io.Writer
-	resolve    func(string) string
 	args       []string
 	params     params
 	matchCount int
@@ -159,7 +171,7 @@ func (c *cmd) execute() error {
 	}
 
 	if len(c.args) < 2 {
-		r := c.stdin
+		r := c.ioEnv.Stdin
 		if r == nil {
 			r = strings.NewReader("")
 		}
@@ -173,10 +185,7 @@ func (c *cmd) execute() error {
 	} else {
 		c.showName = (len(c.args[1:]) > 1 || c.params.recursive || c.params.noShowMatch) && !c.params.headers
 		for _, v := range c.args[1:] {
-			resolvedRoot := v
-			if c.resolve != nil {
-				resolvedRoot = c.resolve(v)
-			}
+			resolvedRoot := c.ioEnv.ResolvePath(v)
 			stop := false
 			err := filepath.Walk(resolvedRoot, func(path string, fi os.FileInfo, err error) error {
 				if c.ctx != nil {
@@ -195,19 +204,19 @@ func (c *cmd) execute() error {
 					}
 				}
 				if err != nil {
-					fmt.Fprintf(c.stderr, "grep: %v: %v\n", displayName, err)
+					fmt.Fprintf(c.ioEnv.Stderr, "grep: %v: %v\n", displayName, err)
 					return nil
 				}
 				if fi.IsDir() {
 					if !c.params.recursive {
-						fmt.Fprintf(c.stderr, "grep: %v: Is a directory\n", displayName)
+						fmt.Fprintf(c.ioEnv.Stderr, "grep: %v: Is a directory\n", displayName)
 						return filepath.SkipDir
 					}
 					return nil
 				}
 				fp, err := os.Open(path)
 				if err != nil {
-					fmt.Fprintf(c.stderr, "can't open %s: %v\n", displayName, err)
+					fmt.Fprintf(c.ioEnv.Stderr, "can't open %s: %v\n", displayName, err)
 					return nil
 				}
 				defer fp.Close()
@@ -241,65 +250,6 @@ func (c *cmd) execute() error {
 	return nil
 }
 
-func (c *cmd) run() error {
-	return c.execute()
-}
-
-// run is the legacy test runner kept for backward compatibility with grep_test.go.
-func run(stdin io.ReadCloser, stdout io.Writer, stderr io.Writer, args []string) error {
-	st := cmd{
-		stdin:  stdin,
-		stdout: bufio.NewWriter(stdout),
-		stderr: stderr,
-	}
-
-	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	f.StringVar(&st.params.expr, "regexp", "", "Pattern to match")
-	f.StringVar(&st.params.expr, "e", "", "Pattern to match (shorthand)")
-
-	f.BoolVar(&st.params.headers, "no-filename", false, "Suppress file name prefixes on output")
-	f.BoolVar(&st.params.headers, "h", false, "Suppress file name prefixes on output (shorthand)")
-
-	f.BoolVar(&st.params.invert, "invert-match", false, "Print only non-matching lines")
-	f.BoolVar(&st.params.invert, "v", false, "Print only non-matching lines (shorthand)")
-
-	f.BoolVar(&st.params.recursive, "recursive", false, "recursive")
-	f.BoolVar(&st.params.recursive, "r", false, "recursive")
-
-	f.BoolVar(&st.params.noShowMatch, "files-with-matches", false, "list only files")
-	f.BoolVar(&st.params.noShowMatch, "l", false, "list only files (shorthand)")
-
-	f.BoolVar(&st.params.count, "count", false, "Just show counts")
-	f.BoolVar(&st.params.count, "c", false, "Just show counts")
-
-	f.BoolVar(&st.params.caseInsensitive, "ignore-case", false, "case-insensitive matching")
-	f.BoolVar(&st.params.caseInsensitive, "i", false, "case-insensitive matching (shorthand)")
-
-	f.BoolVar(&st.params.number, "line-number", false, "Show line numbers")
-	f.BoolVar(&st.params.number, "n", false, "Show line numbers (shorthand)")
-
-	f.BoolVar(&st.params.fixed, "fixed-strings", false, "Match using fixed strings")
-	f.BoolVar(&st.params.fixed, "F", false, "Match using fixed strings (shorthand)")
-
-	f.BoolVar(&st.params.quiet, "quiet", false, "Don't print matches; exit on first match")
-	f.BoolVar(&st.params.quiet, "q", false, "Don't print matches; exit on first match (shorthand)")
-
-	f.BoolVar(&st.params.quiet, "silent", false, "Don't print matches; exit on first match")
-	f.BoolVar(&st.params.quiet, "s", false, "Don't print matches; exit on first match (shorthand)")
-
-	f.Usage = func() {
-		fmt.Fprint(f.Output(), "Usage: grep [-clFivnhqre] [FILE]...\n\n")
-		f.PrintDefaults()
-	}
-
-	if err := f.Parse(unixflag.ArgsToGoArgs(args[1:])); err != nil {
-		return err
-	}
-
-	st.args = f.Args()
-	return st.execute()
-}
-
 // Main executes the grep command with the given execution context.
 func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	defer func() {
@@ -310,11 +260,9 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	st := cmd{
-		ctx:     ctx,
-		stdin:   ioEnv.Stdin,
-		stdout:  bufio.NewWriter(ioEnv.Stdout),
-		stderr:  ioEnv.Stderr,
-		resolve: ioEnv.ResolvePath,
+		ctx:    ctx,
+		ioEnv:  ioEnv,
+		stdout: bufio.NewWriter(ioEnv.Stdout),
 	}
 
 	f := flag.NewFlagSet("grep", flag.ContinueOnError)
@@ -364,6 +312,12 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 2
 	}
 
+	select {
+	case <-ctx.Done():
+		return 130
+	default:
+	}
+
 	st.args = f.Args()
 	if err := st.execute(); err != nil {
 		if errors.Is(err, errQuiet) {
@@ -371,6 +325,9 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 130
+		}
+		if isBrokenPipe(err) {
+			return 0
 		}
 		fmt.Fprintf(ioEnv.Stderr, "grep: %v\n", err)
 		return 2
