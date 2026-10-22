@@ -121,7 +121,7 @@ func TestRunSimple(t *testing.T) {
 		{
 			name:    "SameFile-NoFlags",
 			args:    []string{file1.Name(), file1.Name()},
-			wantErr: cp.ErrSkip,
+			wantErr: errSameFile,
 		},
 		{
 			name:    "NoFlags-Fail-SrcNotExist",
@@ -168,8 +168,8 @@ func TestCpSrcDirectory(t *testing.T) {
 	var logBytes bytes.Buffer
 	var in bufio.Reader
 
-	if err := run([]string{tempDir, tempDirTwo}, &logBytes, &in); err != nil {
-		t.Fatalf(`run([]string{tempDir, tempDirTwo}, &logBytes, &in) = %q, not nil`, err)
+	if err := run([]string{tempDir, tempDirTwo}, &logBytes, &in); err == nil {
+		t.Fatal("cp succeeded when asked to copy a directory without -r")
 	}
 
 	outString := fmt.Sprintf("cp: -r not specified, omitting directory %s", tempDir)
@@ -513,4 +513,3 @@ func TestMainInvocation(t *testing.T) {
 		}
 	})
 }
-

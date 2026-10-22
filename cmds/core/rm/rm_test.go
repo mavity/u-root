@@ -44,7 +44,7 @@ func setup(t *testing.T) string {
 		},
 	} {
 		var (
-			err      error
+			err   error
 			fpath = filepath.Join(d, f.name)
 		)
 		if f.isdir {
@@ -157,4 +157,45 @@ func TestRm(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRemoveDirectories(t *testing.T) {
+	t.Run("empty directory requires -d", func(t *testing.T) {
+		dir := t.TempDir()
+		empty := filepath.Join(dir, "empty")
+		if err := os.Mkdir(empty, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		ioEnv := core.IO{Stdin: bytes.NewReader(nil), Stdout: io.Discard, Stderr: io.Discard}
+		if err := rm(context.Background(), ioEnv, empty); err == nil {
+			t.Fatal("rm removed an empty directory without -d")
+		}
+		if _, err := os.Stat(empty); err != nil {
+			t.Fatalf("empty directory was removed: %v", err)
+		}
+		if err := rm(context.Background(), ioEnv, "-d", empty); err != nil {
+			t.Fatalf("rm -d empty directory: %v", err)
+		}
+		if _, err := os.Stat(empty); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rm -d left directory behind: err=%v", err)
+		}
+	})
+
+	t.Run("-d refuses a non-empty directory", func(t *testing.T) {
+		dir := t.TempDir()
+		nonEmpty := filepath.Join(dir, "non-empty")
+		if err := os.Mkdir(nonEmpty, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(nonEmpty, "child"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		ioEnv := core.IO{Stdin: bytes.NewReader(nil), Stdout: io.Discard, Stderr: io.Discard}
+		if err := rm(context.Background(), ioEnv, "-d", nonEmpty); err == nil {
+			t.Fatal("rm -d removed a non-empty directory")
+		}
+		if _, err := os.Stat(filepath.Join(nonEmpty, "child")); err != nil {
+			t.Fatalf("rm -d removed a child: %v", err)
+		}
+	})
 }

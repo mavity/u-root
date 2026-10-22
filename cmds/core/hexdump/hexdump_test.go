@@ -40,6 +40,7 @@ func TestHexdump(t *testing.T) {
 			readInput: testString,
 			want: `00000000  61 62 63 64 65 66 67 68  69 6a 6b 6c 6d 6e 6f 70  |abcdefghijklmnop|
 00000010  71 72 73 74 75 76 77 78  79 7a                    |qrstuvwxyz|
+0000001a
 `,
 		},
 		{
@@ -47,6 +48,7 @@ func TestHexdump(t *testing.T) {
 			filenames: []string{filepath.Join(d, "testfile")},
 			want: `00000000  61 62 63 64 65 66 67 68  69 6a 6b 6c 6d 6e 6f 70  |abcdefghijklmnop|
 00000010  71 72 73 74 75 76 77 78  79 7a                    |qrstuvwxyz|
+0000001a
 `,
 		},
 		{
@@ -56,6 +58,7 @@ func TestHexdump(t *testing.T) {
 00000010  71 72 73 74 75 76 77 78  79 7a 61 62 63 64 65 66  |qrstuvwxyzabcdef|
 00000020  67 68 69 6a 6b 6c 6d 6e  6f 70 71 72 73 74 75 76  |ghijklmnopqrstuv|
 00000030  77 78 79 7a                                       |wxyz|
+00000034
 `,
 		},
 		{
@@ -88,13 +91,59 @@ func TestHexdump(t *testing.T) {
 	}
 }
 
+func TestMainFormatsAndRepeatedLines(t *testing.T) {
+	input := strings.Repeat("A", 32)
+	defaultLine := "0000000 " + strings.Repeat("4141 ", 8) + "\n"
+	canonicalLine := "00000000  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |AAAAAAAAAAAAAAAA|\n"
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "default suppresses duplicate rows",
+			want: defaultLine + "*\n0000020\n",
+		},
+		{
+			name: "verbose default prints duplicate rows",
+			args: []string{"-v"},
+			want: defaultLine + "0000010 " + strings.Repeat("4141 ", 8) + "\n0000020\n",
+		},
+		{
+			name: "canonical suppresses duplicate rows",
+			args: []string{"-C"},
+			want: canonicalLine + "*\n00000020\n",
+		},
+		{
+			name: "verbose canonical prints duplicate rows",
+			args: []string{"-C", "-v"},
+			want: canonicalLine + "00000010  41 41 41 41 41 41 41 41  41 41 41 41 41 41 41 41  |AAAAAAAAAAAAAAAA|\n00000020\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdin:  strings.NewReader(input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, tt.args...)
+			if code != 0 {
+				t.Fatalf("hexdump exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if got := stdout.String(); got != tt.want {
+				t.Errorf("hexdump output = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestMainSkipAndLimitAndWriterError(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), core.IO{
 		Stdin:  strings.NewReader("ABCDEF"),
 		Stdout: &stdout,
 		Stderr: &stderr,
-	}, "-s", "1", "-n", "2", "-v")
+	}, "-C", "-s", "1", "-n", "2", "-v")
 	if code != 0 {
 		t.Fatalf("hexdump exit code = %d, want 0; stderr = %q", code, stderr.String())
 	}

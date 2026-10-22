@@ -16,15 +16,17 @@ type LookupEnvFunc func(key string) (string, bool)
 
 // IO defines the execution environment injected into in-process commands.
 type IO struct {
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
-	Dir       string
-	LookupEnv LookupEnvFunc
-	Setenv    func(key, value string) error
-	Environ   func() []string
-	Runner    func(ctx context.Context, ioEnv IO, args ...string) int
-	IsBuiltin func(name string) bool
+	Stdin            io.Reader
+	Stdout           io.Writer
+	Stderr           io.Writer
+	Dir              string
+	StdoutIsTerminal bool
+	TerminalWidth    int
+	LookupEnv        LookupEnvFunc
+	Setenv           func(key, value string) error
+	Environ          func() []string
+	Runner           func(ctx context.Context, ioEnv IO, args ...string) int
+	IsBuiltin        func(name string) bool
 }
 
 // ResolvePath resolves relative paths against ioEnv.Dir without mutating process cwd.

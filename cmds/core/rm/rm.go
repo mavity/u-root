@@ -36,6 +36,7 @@ type flags struct {
 	verbose     bool
 	recursive   bool
 	force       bool
+	directory   bool
 }
 
 func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
@@ -48,6 +49,7 @@ func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
 	fs.BoolVar(&f.recursive, "r", false, "equivalent to -R")
 	fs.BoolVar(&f.recursive, "R", false, "Recursive, remove hierarchies")
 	fs.BoolVar(&f.force, "f", false, "Force, ignore nonexistent files and never prompt")
+	fs.BoolVar(&f.directory, "d", false, "remove empty directories")
 
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "%s...\n", errUsage)
@@ -90,6 +92,16 @@ func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
 		}
 
 		resolvedFile := ioEnv.ResolvePath(file)
+		info, err := os.Lstat(resolvedFile)
+		if err != nil {
+			if f.force && errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return err
+		}
+		if info.IsDir() && !f.recursive && !f.directory {
+			return fmt.Errorf("cannot remove %q: is a directory", file)
+		}
 		if err := rmf(resolvedFile); err != nil {
 			if f.force && errors.Is(err, os.ErrNotExist) {
 				continue

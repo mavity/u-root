@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -228,6 +229,96 @@ func TestMainInvocation(t *testing.T) {
 		}
 	})
 
+	t.Run("force overwrites destination", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "src"), []byte("new"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "dst"), []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var stderr bytes.Buffer
+		code := Main(ctx, core.IO{Dir: dir, Stderr: &stderr}, "-f", "src", "dst")
+		got, err := os.ReadFile(filepath.Join(dir, "dst"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code != 0 || string(got) != "new" {
+			t.Fatalf("mv -f: code=%d dst=%q stderr=%q", code, got, stderr.String())
+		}
+		if _, err := os.Stat(filepath.Join(dir, "src")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("source still exists after forced move: err=%v", err)
+		}
+	})
+
+	t.Run("interactive overwrite accepts and declines", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			answer   string
+			wantSrc  bool
+			wantDest string
+		}{
+			{name: "decline", answer: "n\n", wantSrc: true, wantDest: "old"},
+			{name: "accept", answer: "yes\n", wantDest: "new"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "src"), []byte("new"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "dst"), []byte("old"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var stderr bytes.Buffer
+				ioEnv := core.IO{Dir: dir, Stdin: strings.NewReader(tc.answer), Stderr: &stderr}
+				code := Main(ctx, ioEnv, "-i", "src", "dst")
+				got, err := os.ReadFile(filepath.Join(dir, "dst"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code != 0 || string(got) != tc.wantDest || !strings.Contains(stderr.String(), "overwrite") {
+					t.Fatalf("mv -i: code=%d dst=%q stderr=%q", code, got, stderr.String())
+				}
+				_, srcErr := os.Stat(filepath.Join(dir, "src"))
+				if (srcErr == nil) != tc.wantSrc {
+					t.Fatalf("source existence: err=%v, want exists=%t", srcErr, tc.wantSrc)
+				}
+			})
+		}
+	})
+
+	t.Run("last overwrite option wins", func(t *testing.T) {
+		for _, tc := range []struct {
+			name     string
+			args     []string
+			stdin    string
+			wantDest string
+		}{
+			{name: "force overrides interactive", args: []string{"-i", "-f"}, wantDest: "new"},
+			{name: "interactive overrides force", args: []string{"-f", "-i"}, stdin: "n\n", wantDest: "old"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				if err := os.WriteFile(filepath.Join(dir, "src"), []byte("new"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "dst"), []byte("old"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var stderr bytes.Buffer
+				args := append(append([]string{}, tc.args...), "src", "dst")
+				code := Main(ctx, core.IO{Dir: dir, Stdin: strings.NewReader(tc.stdin), Stderr: &stderr}, args...)
+				got, err := os.ReadFile(filepath.Join(dir, "dst"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if code != 0 || string(got) != tc.wantDest {
+					t.Fatalf("mv %v: code=%d dst=%q stderr=%q", tc.args, code, got, stderr.String())
+				}
+			})
+		}
+	})
+
 	t.Run("insufficient args returns 1", func(t *testing.T) {
 		var stderr bytes.Buffer
 		ioEnv := core.IO{Stderr: &stderr}
@@ -246,4 +337,3 @@ func TestMainInvocation(t *testing.T) {
 		}
 	})
 }
-

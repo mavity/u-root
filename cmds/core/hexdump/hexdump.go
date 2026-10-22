@@ -7,65 +7,150 @@ package hexdump
 
 import (
 	"context"
-	"encoding/hex"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
-	"strconv"
+	"strings"
 
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-type offsetWriter struct {
-	writer io.Writer
-	offset uint64
-	line   []byte
+type hexdumpFormatter struct {
+	writer       io.Writer
+	offset       uint64
+	canonical    bool
+	verbose      bool
+	row          []byte
+	previousLine string
+	havePrevious bool
+	suppressed   bool
+	closed       bool
 }
 
-func (w *offsetWriter) writeLine() error {
-	line := w.line
-	if len(line) >= 8 {
-		if base, err := strconv.ParseUint(string(line[:8]), 16, 64); err == nil {
-			prefix := []byte(fmt.Sprintf("%08x", base+w.offset))
-			line = append(prefix, line[8:]...)
-		}
-	}
-	line = append(line, '\n')
-	n, err := w.writer.Write(line)
+func (w *hexdumpFormatter) writeString(s string) error {
+	n, err := io.WriteString(w.writer, s)
 	if err != nil {
 		return err
 	}
-	if n != len(line) {
+	if n != len(s) {
 		return io.ErrShortWrite
 	}
-	w.line = w.line[:0]
 	return nil
 }
 
-func (w *offsetWriter) Write(p []byte) (int, error) {
-	for i, b := range p {
-		if b == '\n' {
-			if err := w.writeLine(); err != nil {
-				return i + 1, err
+func formatRow(row []byte, canonical bool) string {
+	var line strings.Builder
+	if canonical {
+		for i := 0; i < 16; i++ {
+			if i == 8 {
+				line.WriteByte(' ')
 			}
+			if i < len(row) {
+				fmt.Fprintf(&line, "%02x ", row[i])
+			} else {
+				line.WriteString("   ")
+			}
+		}
+		line.WriteString(" |")
+		for i := 0; i < len(row); i++ {
+			if row[i] >= 0x20 && row[i] <= 0x7e {
+				line.WriteByte(row[i])
+			} else {
+				line.WriteByte('.')
+			}
+		}
+		line.WriteString("|\n")
+		return line.String()
+	}
+
+	for i := 0; i < 16; i += 2 {
+		if i >= len(row) {
+			line.WriteString("     ")
 			continue
 		}
-		w.line = append(w.line, b)
+		var pair [2]byte
+		copy(pair[:], row[i:min(i+2, len(row))])
+		fmt.Fprintf(&line, "%04x ", binary.NativeEndian.Uint16(pair[:]))
 	}
-	return len(p), nil
+	line.WriteByte('\n')
+	return line.String()
 }
 
-func (w *offsetWriter) Close() error {
-	if len(w.line) == 0 {
+func (w *hexdumpFormatter) writeRow(row []byte) error {
+	line := formatRow(row, w.canonical)
+	if !w.verbose && w.havePrevious && line == w.previousLine {
+		w.suppressed = true
+		w.offset += uint64(len(row))
 		return nil
 	}
-	return w.writeLine()
+
+	if w.suppressed {
+		if err := w.writeString("*\n"); err != nil {
+			return err
+		}
+		w.suppressed = false
+	}
+
+	prefix := fmt.Sprintf("%07x ", w.offset)
+	if w.canonical {
+		prefix = fmt.Sprintf("%08x  ", w.offset)
+	}
+	if err := w.writeString(prefix + line); err != nil {
+		return err
+	}
+	w.previousLine = line
+	w.havePrevious = true
+	w.offset += uint64(len(row))
+	return nil
 }
 
-func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string, maxBytes, skip int64) (retErr error) {
+func (w *hexdumpFormatter) Write(p []byte) error {
+	for len(p) > 0 {
+		n := min(16-len(w.row), len(p))
+		w.row = append(w.row, p[:n]...)
+		p = p[n:]
+		if len(w.row) == 16 {
+			if err := w.writeRow(w.row); err != nil {
+				return err
+			}
+			w.row = w.row[:0]
+		}
+	}
+	return nil
+}
+
+func (w *hexdumpFormatter) Close(writeFinalOffset bool) error {
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+	if len(w.row) > 0 {
+		if err := w.writeRow(w.row); err != nil {
+			return err
+		}
+		w.row = w.row[:0]
+	}
+	if w.suppressed {
+		if err := w.writeString("*\n"); err != nil {
+			return err
+		}
+		w.suppressed = false
+	}
+	if writeFinalOffset {
+		width := 7
+		if w.canonical {
+			width = 8
+		}
+		return w.writeString(fmt.Sprintf("%0*x\n", width, w.offset))
+	}
+	return nil
+}
+
+func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string, maxBytes, skip int64, canonical, verbose bool) (retErr error) {
 	var readers []io.Reader
 	var closers []io.Closer
 	defer func() {
@@ -114,13 +199,15 @@ func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string, maxBytes
 		r = io.LimitReader(r, maxBytes)
 	}
 
-	adjusted := &offsetWriter{writer: ioEnv.Stdout, offset: uint64(skip)}
-	w := hex.Dumper(adjusted)
+	w := &hexdumpFormatter{
+		writer:    ioEnv.Stdout,
+		offset:    uint64(skip),
+		canonical: canonical,
+		verbose:   verbose,
+	}
+	writeFinalOffset := false
 	defer func() {
-		if err := w.Close(); retErr == nil && err != nil {
-			retErr = err
-		}
-		if err := adjusted.Close(); retErr == nil && err != nil {
+		if err := w.Close(writeFinalOffset); retErr == nil && err != nil {
 			retErr = err
 		}
 	}()
@@ -134,16 +221,13 @@ func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string, maxBytes
 		}
 		nr, er := r.Read(buf)
 		if nr > 0 {
-			nw, ew := w.Write(buf[:nr])
-			if ew != nil {
-				return ew
-			}
-			if nr != nw {
-				return io.ErrShortWrite
+			if err := w.Write(buf[:nr]); err != nil {
+				return err
 			}
 		}
 		if er != nil {
 			if er == io.EOF {
+				writeFinalOffset = true
 				break
 			}
 			return er
@@ -159,7 +243,7 @@ func hexdump(filenames []string, reader io.Reader, writer io.Writer) error {
 		Stdin:  reader,
 		Stdout: writer,
 	}
-	return runHexdump(context.Background(), ioEnv, filenames, -1, 0)
+	return runHexdump(context.Background(), ioEnv, filenames, -1, 0, true, false)
 }
 
 // Main runs the hexdump command.
@@ -198,7 +282,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}
 	_ = canonical
 	_ = verbose
-	if err := runHexdump(ctx, ioEnv, fs.Args(), maxBytes, skip); err != nil {
+	if err := runHexdump(ctx, ioEnv, fs.Args(), maxBytes, skip, canonical, verbose); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 130
 		}
