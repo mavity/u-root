@@ -888,3 +888,39 @@ func TestMainInvocation(t *testing.T) {
 	})
 }
 
+func TestMainLongTokensAndOutputErrors(t *testing.T) {
+	longToken := strings.Repeat("x", 128*1024)
+	g := newGraph()
+	if err := parseInto(context.Background(), strings.NewReader(longToken+" "+longToken), g); err != nil {
+		t.Fatalf("parseInto rejected a long token: %v", err)
+	}
+	if g.nodeCount() != 1 {
+		t.Fatalf("graph node count = %d, want 1", g.nodeCount())
+	}
+
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("a b\n"),
+		Stdout: tsortErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	})
+	if code == 0 {
+		t.Fatal("tsort returned success after output failure")
+	}
+
+	code = Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("a b\n"),
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	}, "first", "second")
+	if code == 0 {
+		t.Fatal("tsort accepted more than one input file")
+	}
+}
+
+type tsortErrorWriter struct {
+	err error
+}
+
+func (w tsortErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}

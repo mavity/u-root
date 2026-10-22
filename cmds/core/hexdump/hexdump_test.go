@@ -6,11 +6,16 @@ package hexdump
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestHexdump(t *testing.T) {
@@ -75,9 +80,42 @@ func TestHexdump(t *testing.T) {
 					t.Fatalf("hexdump() = '%v', want: '%v'", got, tt.wantErr)
 				}
 			}
+
 			if writeBuf.String() != tt.want {
 				t.Errorf("Console output: %q, want: %q", writeBuf.String(), tt.want)
 			}
 		})
 	}
+}
+
+func TestMainSkipAndLimitAndWriterError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("ABCDEF"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-s", "1", "-n", "2", "-v")
+	if code != 0 {
+		t.Fatalf("hexdump exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got := stdout.String(); !strings.Contains(got, "00000001") || !strings.Contains(got, "42 43") || strings.Contains(got, "44") {
+		t.Errorf("hexdump skip/limit output = %q", got)
+	}
+
+	code = Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("A"),
+		Stdout: hexdumpErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	})
+	if code == 0 {
+		t.Fatal("hexdump returned success after output failure")
+	}
+}
+
+type hexdumpErrorWriter struct {
+	err error
+}
+
+func (w hexdumpErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

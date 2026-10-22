@@ -35,7 +35,7 @@ func (a ignoreBlanksSort) Less(i, j int) bool {
 	l := strings.TrimLeftFunc(a[i], unicode.IsSpace)
 	r := strings.TrimLeftFunc(a[j], unicode.IsSpace)
 	if l == r {
-		return len(a[i]) >= len(a[j])
+		return len(a[i]) > len(a[j])
 	}
 	return l < r
 }
@@ -48,7 +48,10 @@ func (a ignoreBlanksCaseSort) Less(i, j int) bool {
 	l := strings.ToUpper(strings.TrimLeftFunc(a[i], unicode.IsSpace))
 	r := strings.ToUpper(strings.TrimLeftFunc(a[j], unicode.IsSpace))
 	if l == r {
-		return len(a[i]) >= len(a[j])
+		if len(a[i]) != len(a[j]) {
+			return len(a[i]) > len(a[j])
+		}
+		return a[i] < a[j]
 	}
 	return l < r
 }
@@ -102,51 +105,70 @@ func command(stdin io.ReadCloser, stdout, stderr io.Writer, p params, args []str
 func sortInterface(p params, lines []string) stdsort.Interface {
 	var si stdsort.Interface
 	switch {
+	case p.numeric:
+		si = numericSort(lines)
 	case p.ignoreBlanks && p.ignoreCase:
 		si = ignoreBlanksCaseSort(lines)
 	case p.ignoreBlanks:
 		si = ignoreBlanksSort(lines)
 	case p.ignoreCase:
 		si = ignoreCaseSort(lines)
-	case p.numeric:
-		si = numericSort(lines)
 	default:
 		si = stdsort.StringSlice(lines)
 	}
 	return si
 }
 
-func sortAlgorithm(p params, s string) string {
-	if len(s) == 0 {
-		return ""
+func sameSortKey(p params, left, right string) bool {
+	if p.numeric {
+		l, _ := strconv.ParseFloat(strings.ToUpper(strings.TrimLeftFunc(left, unicode.IsSpace)), 64)
+		r, _ := strconv.ParseFloat(strings.ToUpper(strings.TrimLeftFunc(right, unicode.IsSpace)), 64)
+		return l == r || (l != l && r != r)
+	}
+	if p.ignoreBlanks {
+		left = strings.TrimLeftFunc(left, unicode.IsSpace)
+		right = strings.TrimLeftFunc(right, unicode.IsSpace)
+	}
+	if p.ignoreCase {
+		return strings.ToUpper(left) == strings.ToUpper(right)
+	}
+	return left == right
+}
+
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
 	}
 	lines := strings.Split(s, "\n")
+	if strings.HasSuffix(s, "\n") {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
+}
+
+func sortAlgorithm(p params, s string) string {
+	lines := splitLines(s)
+	if len(lines) == 0 {
+		return ""
+	}
 	si := sortInterface(p, lines)
 
 	if p.reverse {
-		stdsort.Sort(stdsort.Reverse(si))
+		stdsort.Stable(stdsort.Reverse(si))
 	} else {
-		stdsort.Sort(si)
+		stdsort.Stable(si)
 	}
 
 	if p.unique && len(lines) > 1 {
-		j := 1
+		write := 1
 		for i := 1; i < len(lines); i++ {
-			if p.ignoreCase && p.ignoreBlanks {
-				l1 := strings.TrimLeftFunc(lines[i], unicode.IsSpace)
-				l2 := strings.TrimLeftFunc(lines[i-1], unicode.IsSpace)
-				if strings.EqualFold(l1, l2) {
-					continue
-				}
-			} else if p.ignoreCase && strings.EqualFold(lines[i], lines[j]) {
-				continue
-			} else if lines[i] == lines[i-1] {
+			if sameSortKey(p, lines[write-1], lines[i]) {
 				continue
 			}
-			lines[j] = lines[i]
-			j++
+			lines[write] = lines[i]
+			write++
 		}
-		lines = lines[:j]
+		lines = lines[:write]
 	}
 
 	return strings.Join(lines, "\n") + "\n"
@@ -216,22 +238,20 @@ func runSort(ctx context.Context, ioEnv core.IO, p params, args []string) error 
 
 	s := strings.Join(fileContents, "")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
-	if len(s) > 0 && s[len(s)-1] == '\n' {
-		s = s[:len(s)-1]
-	}
 
 	if p.ordered {
-		p.ignoreBlanks = false
-		lines := strings.Split(s, "\n")
-		if !stdsort.IsSorted(sortInterface(p, lines)) {
+		lines := splitLines(s)
+		si := sortInterface(p, lines)
+		if p.reverse {
+			si = stdsort.Reverse(si)
+		}
+		if !stdsort.IsSorted(si) {
 			return ErrNotOrdered
 		}
 
 		if p.unique && len(lines) > 1 {
 			for i := 1; i < len(lines); i++ {
-				if p.ignoreCase && strings.EqualFold(lines[i], lines[i-1]) {
-					return ErrNotOrdered
-				} else if lines[i] == lines[i-1] {
+				if sameSortKey(p, lines[i], lines[i-1]) {
 					return ErrNotOrdered
 				}
 			}

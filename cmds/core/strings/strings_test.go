@@ -6,11 +6,16 @@ package stringscmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestStrings(t *testing.T) {
@@ -157,6 +162,7 @@ func TestStrings(t *testing.T) {
 		if err != nil {
 			t.Errorf("failed to create tmp file: %v", err)
 		}
+
 		_, err = file.WriteString(tt.input)
 		if err != nil {
 			t.Errorf("failed to write to file: %v", err)
@@ -180,4 +186,37 @@ func TestStrings(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStringsLongOffsetAndWriteErrors(t *testing.T) {
+	value := strings.Repeat("x", 4096)
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  bytes.NewBuffer(append([]byte{0}, []byte(value)...)),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-t", "d", "-n", "4")
+	if code != 0 {
+		t.Fatalf("strings exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "1 "+value+"\n"; got != want {
+		t.Errorf("strings output = %q, want output with offset 1 and the complete string", got)
+	}
+
+	code = Main(context.Background(), core.IO{
+		Stdin:  bytes.NewBufferString("hello"),
+		Stdout: stringsErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	}, "-n", "1")
+	if code == 0 {
+		t.Fatal("strings returned success after output failure")
+	}
+}
+
+type stringsErrorWriter struct {
+	err error
+}
+
+func (w stringsErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

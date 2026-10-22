@@ -65,16 +65,25 @@ func decodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func encodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
+func encodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) (retErr error) {
 	// WriteCloser is important here, from NewEncoder documentation:
 	// when finished writing, the caller must Close the returned encoder
 	// to flush any partially written blocks.
 	wc := base64.NewEncoder(base64.StdEncoding, stdout)
-	defer wc.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			if err := wc.Close(); retErr == nil && err != nil {
+				retErr = fmt.Errorf("closing encoder: %w", err)
+			}
+		}
+	}()
 	if _, err := io.Copy(wc, cancelReader{ctx: ctx, r: stdin}); err != nil {
 		return fmt.Errorf("error encoding: %w", err)
 	}
-	if err := wc.Close(); err != nil { // flush any remaining data
+	err := wc.Close()
+	closed = true
+	if err != nil {
 		return fmt.Errorf("closing encoder: %w", err)
 	}
 	if _, err := fmt.Fprintln(stdout); err != nil {
@@ -83,7 +92,7 @@ func encodeone(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
 	return nil
 }
 
-func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, resolvePath func(string) string, args ...string) error {
+func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, resolvePath func(string) string, args ...string) (retErr error) {
 	c := cmd{
 		stdin:  stdin,
 		stdout: stdout,
@@ -116,7 +125,11 @@ func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() {
+			if err := f.Close(); retErr == nil && err != nil {
+				retErr = err
+			}
+		}()
 		c.stdin = f
 	}
 
@@ -144,6 +157,9 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	if err := runWithCtx(ctx, ioEnv.Stdin, ioEnv.Stdout, ioEnv.Stderr, ioEnv.ResolvePath, args...); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return 130
+		}
 		fmt.Fprintf(ioEnv.Stderr, "base64: %v\n", err)
 		return 1
 	}

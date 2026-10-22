@@ -6,6 +6,7 @@ package sort
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestSortStdin(t *testing.T) {
@@ -277,5 +280,96 @@ func TestSortFiles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestMainSortFlagCombinations(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		args     []string
+		input    string
+		want     string
+		wantCode int
+	}{
+		{
+			name:  "unique case-insensitive keeps distinct keys",
+			args:  []string{"-u", "-f"},
+			input: "alpha\nBeta\nGAMMA\n",
+			want:  "alpha\nBeta\nGAMMA\n",
+		},
+		{
+			name:  "unique ignores leading blanks",
+			args:  []string{"-u", "-b"},
+			input: " b\n  b\nc\n",
+			want:  "  b\nc\n",
+		},
+		{
+			name:  "numeric unique compares numeric keys",
+			args:  []string{"-u", "-n"},
+			input: "1\n01\n2\n",
+			want:  "1\n2\n",
+		},
+		{
+			name:     "check uses reverse ordering",
+			args:     []string{"-C", "-r"},
+			input:    "c\nb\na\n",
+			wantCode: 0,
+		},
+		{
+			name:     "check rejects natural ordering when reverse requested",
+			args:     []string{"-C", "-r"},
+			input:    "a\nb\nc\n",
+			wantCode: 1,
+		},
+		{
+			name:     "check honors leading-blank comparison",
+			args:     []string{"-C", "-b"},
+			input:    "  b\na\n",
+			wantCode: 1,
+		},
+		{
+			name:  "preserves a single empty line",
+			input: "\n",
+			want:  "\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdin:  strings.NewReader(tt.input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, tt.args...)
+			if code != tt.wantCode {
+				t.Fatalf("sort exit code = %d, want %d; stderr = %q", code, tt.wantCode, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Errorf("sort output = %q, want %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestMainOutputPathUsesExecutionDirectory(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("b\na\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Dir:    dir,
+	}, "-o", "sorted.txt")
+	if code != 0 {
+		t.Fatalf("sort exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("sort wrote to stdout instead of the output file: %q", stdout.String())
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "sorted.txt"))
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if string(got) != "a\nb\n" {
+		t.Errorf("output file = %q, want %q", got, "a\nb\n")
 	}
 }

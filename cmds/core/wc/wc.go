@@ -22,15 +22,16 @@ import (
 )
 
 type params struct {
-	lines  bool
-	words  bool
-	runes  bool
-	broken bool
-	chars  bool
+	lines       bool
+	words       bool
+	runes       bool
+	broken      bool
+	chars       bool
+	longestLine bool
 }
 
 type cnt struct {
-	lines, words, runes, badRunes, chars int64
+	lines, words, runes, badRunes, chars, longestLine int64
 }
 
 type cmd struct {
@@ -101,14 +102,24 @@ func countReader(ctx context.Context, in io.Reader, stderr io.Writer, fname stri
 			count.lines++
 		}
 		count.words += int64(len(bytes.Fields(line)))
+		lineRunes := utf8.RuneCount(line)
+		if lineRunes > 0 && line[len(line)-1] == '\n' {
+			lineRunes--
+			if len(line) > 1 && line[len(line)-2] == '\r' {
+				lineRunes--
+			}
+		}
 		count.runes += int64(utf8.RuneCount(line))
+		if int64(lineRunes) > count.longestLine {
+			count.longestLine = int64(lineRunes)
+		}
 		count.chars += int64(len(line))
 		count.badRunes += invalidCount(line)
 	}
 	return count, nil
 }
 
-func report(w io.Writer, p params, count cnt, fname string) {
+func report(w io.Writer, p params, count cnt, fname string) error {
 	fields := []string{}
 	if p.lines {
 		fields = append(fields, fmt.Sprintf("%d", count.lines))
@@ -125,16 +136,20 @@ func report(w io.Writer, p params, count cnt, fname string) {
 	if p.chars {
 		fields = append(fields, fmt.Sprintf("%d", count.chars))
 	}
+	if p.longestLine {
+		fields = append(fields, fmt.Sprintf("%d", count.longestLine))
+	}
 	if fname != "" {
 		fields = append(fields, fname)
 	}
 
-	fmt.Fprintln(w, strings.Join(fields, " "))
+	_, err := fmt.Fprintln(w, strings.Join(fields, " "))
+	return err
 }
 
 func runWc(ctx context.Context, ioEnv core.IO, p params, args []string) error {
 	var totals cnt
-	if !p.lines && !p.words && !p.runes && !p.broken && !p.chars {
+	if !p.lines && !p.words && !p.runes && !p.broken && !p.chars && !p.longestLine {
 		p.lines, p.words, p.chars = true, true, true
 	}
 
@@ -143,8 +158,7 @@ func runWc(ctx context.Context, ioEnv core.IO, p params, args []string) error {
 		if err != nil {
 			return err
 		}
-		report(ioEnv.Stdout, p, res, "")
-		return nil
+		return report(ioEnv.Stdout, p, res, "")
 	}
 
 	var errs error
@@ -166,7 +180,12 @@ func runWc(ctx context.Context, ioEnv core.IO, p params, args []string) error {
 			totals.runes += res.runes
 			totals.badRunes += res.badRunes
 			totals.chars += res.chars
-			report(ioEnv.Stdout, p, res, "-")
+			if res.longestLine > totals.longestLine {
+				totals.longestLine = res.longestLine
+			}
+			if err := report(ioEnv.Stdout, p, res, "-"); err != nil {
+				return err
+			}
 		} else {
 			resolved := ioEnv.ResolvePath(v)
 			f, err := os.Open(resolved)
@@ -185,11 +204,18 @@ func runWc(ctx context.Context, ioEnv core.IO, p params, args []string) error {
 			totals.runes += res.runes
 			totals.badRunes += res.badRunes
 			totals.chars += res.chars
-			report(ioEnv.Stdout, p, res, v)
+			if res.longestLine > totals.longestLine {
+				totals.longestLine = res.longestLine
+			}
+			if err := report(ioEnv.Stdout, p, res, v); err != nil {
+				return err
+			}
 		}
 	}
 	if len(args) > 1 {
-		report(ioEnv.Stdout, p, totals, "total")
+		if err := report(ioEnv.Stdout, p, totals, "total"); err != nil {
+			return err
+		}
 	}
 	return errs
 }
@@ -209,8 +235,10 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	fs.BoolVar(&p.lines, "l", false, "count lines")
 	fs.BoolVar(&p.words, "w", false, "count words")
 	fs.BoolVar(&p.runes, "r", false, "count runes")
+	fs.BoolVar(&p.runes, "m", false, "count characters")
 	fs.BoolVar(&p.broken, "b", false, "count broken")
 	fs.BoolVar(&p.chars, "c", false, "count bytes (include partial UTF)")
+	fs.BoolVar(&p.longestLine, "L", false, "print the length of the longest line")
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {

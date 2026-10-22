@@ -36,7 +36,7 @@ func (c *cmd) run() error {
 	return runTee(context.Background(), ioEnv, c.cat, c.ignore, c.args)
 }
 
-func runTee(ctx context.Context, ioEnv core.IO, cat, ignore bool, args []string) error {
+func runTee(ctx context.Context, ioEnv core.IO, cat, ignore bool, args []string) (retErr error) {
 	oflags := os.O_WRONLY | os.O_CREATE
 	if cat {
 		oflags |= os.O_APPEND
@@ -45,10 +45,19 @@ func runTee(ctx context.Context, ioEnv core.IO, cat, ignore bool, args []string)
 	}
 
 	if ignore {
-		signal.Ignore(os.Interrupt)
+		interrupts := make(chan os.Signal, 1)
+		signal.Notify(interrupts, os.Interrupt)
+		defer signal.Stop(interrupts)
 	}
 
 	files := make([]*os.File, 0, len(args))
+	defer func() {
+		for _, f := range files {
+			if err := f.Close(); retErr == nil && err != nil {
+				retErr = fmt.Errorf("close output %q: %w", f.Name(), err)
+			}
+		}
+	}()
 	writers := make([]io.Writer, 0, len(args)+1)
 	for _, fname := range args {
 		resolved := ioEnv.ResolvePath(fname)
@@ -60,16 +69,6 @@ func runTee(ctx context.Context, ioEnv core.IO, cat, ignore bool, args []string)
 		writers = append(writers, f)
 	}
 	writers = append(writers, ioEnv.Stdout)
-
-	defer func() {
-		for _, f := range files {
-			if err := f.Close(); err != nil {
-				if ioEnv.Stderr != nil {
-					fmt.Fprintf(ioEnv.Stderr, "tee: error closing file %q: %v\n", f.Name(), err)
-				}
-			}
-		}
-	}()
 
 	mw := io.MultiWriter(writers...)
 	buf := make([]byte, 32*1024)

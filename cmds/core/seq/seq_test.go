@@ -8,12 +8,14 @@ package seq
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"strconv"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/u-root/u-root/pkg/core"
 )
 
 type test struct {
@@ -189,4 +191,58 @@ func TestMaxDecimalPlaces(t *testing.T) {
 			t.Errorf("expected %v got %v", tt.expected, res)
 		}
 	}
+}
+
+func TestMainFlagsAndWriterErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "separator",
+			args: []string{"-s", ",", "1", "3"},
+			want: "1,2,3\n",
+		},
+		{
+			name: "format",
+			args: []string{"-f", "%02g", "1", "3"},
+			want: "01\n02\n03\n",
+		},
+		{
+			name: "width spans negative start and positive end",
+			args: []string{"-w", "-3", "2"},
+			want: "-3\n-2\n-1\n00\n01\n02\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, tt.args...)
+			if code != 0 {
+				t.Fatalf("seq exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Errorf("seq output = %q, want %q", stdout.String(), tt.want)
+			}
+		})
+	}
+
+	code := Main(context.Background(), core.IO{
+		Stdout: seqErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	}, "1", "3")
+	if code == 0 {
+		t.Fatal("seq returned success after output failure")
+	}
+}
+
+type seqErrorWriter struct {
+	err error
+}
+
+func (w seqErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

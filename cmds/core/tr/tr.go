@@ -89,7 +89,11 @@ var sets = map[Set]func(r rune) bool{
 }
 
 type transformer struct {
-	transform func(r rune) rune
+	transform      func(r rune) rune
+	delete         func(r rune) bool
+	sourceContains func(rune) bool
+	targetContains func(rune) bool
+	complementRune rune
 }
 
 func setToRune(s Set, outRune rune) *transformer {
@@ -118,10 +122,14 @@ func upperToLower() *transformer {
 
 func runesToRunes(in []rune, out ...rune) *transformer {
 	convs := make(map[rune]rune)
+	sources := make(map[rune]bool, len(in))
+	targets := make(map[rune]bool, len(out))
 	l := len(out)
 	for i, r := range in {
 		ind := min(i, l-1)
 		convs[r] = out[ind]
+		sources[r] = true
+		targets[out[ind]] = true
 	}
 	return &transformer{
 		transform: func(r rune) rune {
@@ -130,6 +138,9 @@ func runesToRunes(in []rune, out ...rune) *transformer {
 			}
 			return r
 		},
+		sourceContains: func(r rune) bool { return sources[r] },
+		targetContains: func(r rune) bool { return targets[r] },
+		complementRune: out[l-1],
 	}
 }
 
@@ -186,19 +197,30 @@ func parse(args []string, del bool) (*transformer, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	var set2 Set
+	sourceContains := setContains(set1, arg1)
 	if del {
-		set2 = Set(unicode.ReplacementChar)
-	} else {
-		set2 = Set(args[1])
+		return &transformer{
+			transform:      func(r rune) rune { return r },
+			delete:         sourceContains,
+			sourceContains: sourceContains,
+		}, nil
 	}
+
+	set2 := Set(args[1])
 
 	if set1 == LOWER && set2 == UPPER {
-		return lowerToUpper(), nil
+		tr := lowerToUpper()
+		tr.sourceContains = sourceContains
+		tr.targetContains = sets[UPPER]
+		tr.complementRune = 'Z'
+		return tr, nil
 	}
 	if set1 == UPPER && set2 == LOWER {
-		return upperToLower(), nil
+		tr := upperToLower()
+		tr.sourceContains = sourceContains
+		tr.targetContains = sets[LOWER]
+		tr.complementRune = 'z'
+		return tr, nil
 	}
 
 	if (set2 == LOWER || set2 == UPPER) && (set1 != LOWER && set1 != UPPER) ||
@@ -218,15 +240,66 @@ func parse(args []string, del bool) (*transformer, error) {
 		return nil, fmt.Errorf("SET2 must be non-empty")
 	}
 	if _, ok := sets[set1]; ok {
-		return setToRune(set1, arg2[0]), nil
+		return &transformer{
+			transform:      setToRune(set1, arg2[0]).transform,
+			sourceContains: sourceContains,
+			targetContains: runeSet(arg2),
+			complementRune: arg2[len(arg2)-1],
+		}, nil
 	}
-	return runesToRunes(arg1, arg2...), nil
+	tr := runesToRunes(arg1, arg2...)
+	tr.sourceContains = sourceContains
+	tr.targetContains = runeSet(arg2)
+	return tr, nil
 }
 
-func runTr(ctx context.Context, ioEnv core.IO, tr *transformer, squeeze bool, sqSet map[rune]bool) error {
+func setContains(set Set, runes []rune) func(rune) bool {
+	if contains, ok := sets[set]; ok {
+		return contains
+	}
+	allowed := make(map[rune]bool, len(runes))
+	for _, r := range runes {
+		allowed[r] = true
+	}
+	return func(r rune) bool { return allowed[r] }
+}
+
+func runeSet(runes []rune) func(rune) bool {
+	allowed := make(map[rune]bool, len(runes))
+	for _, r := range runes {
+		allowed[r] = true
+	}
+	return func(r rune) bool { return allowed[r] }
+}
+
+func negatePredicate(predicate func(rune) bool) func(rune) bool {
+	return func(r rune) bool { return !predicate(r) }
+}
+
+func complementTransformer(tr *transformer) {
+	sourceContains := tr.sourceContains
+	if tr.delete != nil {
+		tr.delete = negatePredicate(sourceContains)
+		return
+	}
+	transform := tr.transform
+	fallback := tr.complementRune
+	tr.transform = func(r rune) rune {
+		if sourceContains(r) {
+			return transform(r)
+		}
+		return fallback
+	}
+}
+
+func runTr(ctx context.Context, ioEnv core.IO, tr *transformer, squeeze bool, sqSet func(rune) bool) (retErr error) {
 	in := bufio.NewReader(ioEnv.Stdin)
 	out := bufio.NewWriter(ioEnv.Stdout)
-	defer out.Flush()
+	defer func() {
+		if err := out.Flush(); retErr == nil && err != nil {
+			retErr = fmt.Errorf("write error: %w", err)
+		}
+	}()
 
 	var prevRune rune
 	hasPrev := false
@@ -247,22 +320,31 @@ func runTr(ctx context.Context, ioEnv core.IO, tr *transformer, squeeze bool, sq
 				}
 				return fmt.Errorf("read error: %w", berr)
 			}
-			if werr := out.WriteByte(b); werr != nil {
-				return fmt.Errorf("write error: %w", werr)
+			if tr.delete == nil || !tr.delete(inRune) {
+				if werr := out.WriteByte(b); werr != nil {
+					return fmt.Errorf("write error: %w", werr)
+				}
 			}
 			hasPrev = false
 		} else if size > 0 {
-			outRune := tr.transform(inRune)
-			if outRune != unicode.ReplacementChar {
-				if squeeze && hasPrev && outRune == prevRune && (len(sqSet) == 0 || sqSet[outRune]) {
-					// duplicate squeezed
-				} else {
-					if _, werr := out.WriteRune(outRune); werr != nil {
-						return fmt.Errorf("write error: %w", werr)
+			if tr.delete != nil && tr.delete(inRune) {
+				if err != nil {
+					if err == io.EOF {
+						return nil
 					}
-					prevRune = outRune
-					hasPrev = true
+					return err
 				}
+				continue
+			}
+			outRune := tr.transform(inRune)
+			if squeeze && hasPrev && outRune == prevRune && (sqSet == nil || sqSet(outRune)) {
+				// duplicate squeezed
+			} else {
+				if _, werr := out.WriteRune(outRune); werr != nil {
+					return fmt.Errorf("write error: %w", werr)
+				}
+				prevRune = outRune
+				hasPrev = true
 			}
 		}
 
@@ -284,13 +366,16 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	var del, squeeze bool
+	var del, squeeze, complement bool
 	fs := flag.NewFlagSet("tr", flag.ContinueOnError)
 	fs.SetOutput(ioEnv.Stderr)
 	fs.BoolVar(&del, "delete", false, "delete characters in SET1, do not translate")
 	fs.BoolVar(&del, "d", false, "delete characters in SET1, do not translate (shorthand)")
 	fs.BoolVar(&squeeze, "squeeze-repeats", false, "squeeze repeated characters")
 	fs.BoolVar(&squeeze, "s", false, "squeeze repeated characters (shorthand)")
+	fs.BoolVar(&complement, "complement", false, "complement SET1")
+	fs.BoolVar(&complement, "c", false, "complement SET1 (shorthand)")
+	fs.BoolVar(&complement, "C", false, "complement SET1 (shorthand)")
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -306,14 +391,12 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 			fmt.Fprintf(ioEnv.Stderr, "tr: %v\n", err)
 			return 1
 		}
-		sqSet := make(map[rune]bool, len(sqRunes))
-		for _, r := range sqRunes {
-			sqSet[r] = true
+		sqSet := setContains(Set(rest[0]), sqRunes)
+		if complement {
+			sqSet = negatePredicate(sqSet)
 		}
-		if _, ok := sets[Set(rest[0])]; ok {
-			sqSet = map[rune]bool{}
-		}
-		if err := runTr(ctx, ioEnv, &transformer{transform: func(r rune) rune { return r }}, true, sqSet); err != nil {
+		tr := &transformer{transform: func(r rune) rune { return r }}
+		if err := runTr(ctx, ioEnv, tr, true, sqSet); err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return 130
 			}
@@ -329,7 +412,22 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 
-	if err := runTr(ctx, ioEnv, tr, squeeze, nil); err != nil {
+	var sqSet func(rune) bool
+	if complement {
+		complementTransformer(tr)
+	}
+	if squeeze {
+		if del {
+			sqSet = tr.sourceContains
+			if complement {
+				sqSet = negatePredicate(sqSet)
+			}
+		} else {
+			sqSet = tr.targetContains
+		}
+	}
+
+	if err := runTr(ctx, ioEnv, tr, squeeze, sqSet); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 130
 		}

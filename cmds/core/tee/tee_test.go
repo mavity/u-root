@@ -7,11 +7,16 @@ package tee
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestTee(t *testing.T) {
@@ -156,4 +161,58 @@ func TestCommand(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainFlagsResolvePathsAndPropagateWriteErrors(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("first\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Dir:    dir,
+	}, "-a", "-i", "copy.txt")
+	if code != 0 {
+		t.Fatalf("tee exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if stdout.String() != "first\n" {
+		t.Errorf("tee stdout = %q, want %q", stdout.String(), "first\n")
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "copy.txt")); err != nil {
+		t.Fatalf("read tee output file: %v", err)
+	} else if string(got) != "first\n" {
+		t.Errorf("tee file = %q, want %q", got, "first\n")
+	}
+
+	code = Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("second\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Dir:    dir,
+	}, "-a", "copy.txt")
+	if code != 0 {
+		t.Fatalf("tee append exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "copy.txt")); err != nil {
+		t.Fatalf("read appended tee file: %v", err)
+	} else if string(got) != "first\nsecond\n" {
+		t.Errorf("appended tee file = %q, want %q", got, "first\nsecond\n")
+	}
+
+	code = Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("failure\n"),
+		Stdout: teeErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	})
+	if code == 0 {
+		t.Fatal("tee returned success after output failure")
+	}
+}
+
+type teeErrorWriter struct {
+	err error
+}
+
+func (w teeErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

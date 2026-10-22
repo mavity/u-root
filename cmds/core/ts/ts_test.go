@@ -6,9 +6,14 @@ package ts
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestTS(t *testing.T) {
@@ -44,4 +49,23 @@ func TestInvalidUse(t *testing.T) {
 	if err == nil {
 		t.Error("expected error, got nil")
 	}
+}
+
+func TestMainWriterError(t *testing.T) {
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("line\n"),
+		Stdout: tsErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	})
+	if code == 0 {
+		t.Fatal("ts returned success after output failure")
+	}
+}
+
+type tsErrorWriter struct {
+	err error
+}
+
+func (w tsErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

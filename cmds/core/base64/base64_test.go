@@ -217,5 +217,18 @@ func TestMainInvocation(t *testing.T) {
 			t.Fatalf("Main with -help returned %d, want 0", code)
 		}
 	})
-}
 
+	t.Run("cancellation returns 130", func(t *testing.T) {
+		cancelled, cancel := context.WithCancel(ctx)
+		cancel()
+		var stdout, stderr bytes.Buffer
+		ioEnv := core.IO{
+			Stdin:  strings.NewReader("input"),
+			Stdout: &stdout,
+			Stderr: &stderr,
+		}
+		if code := Main(cancelled, ioEnv); code != 130 {
+			t.Fatalf("Main returned %d, want 130; stderr=%s", code, stderr.String())
+		}
+	})
+}

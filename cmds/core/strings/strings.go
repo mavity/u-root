@@ -62,7 +62,7 @@ func asciiIsPrint(char byte) bool {
 	return char >= 32 && char <= 126
 }
 
-func offsetValue(t string, offset int) string {
+func offsetValue(t string, offset int64) string {
 	switch t {
 	case "d":
 		return fmt.Sprintf("%d ", offset)
@@ -77,7 +77,42 @@ func offsetValue(t string, offset int) string {
 
 func stringsIO(ctx context.Context, r *bufio.Reader, w io.Writer, p params) error {
 	var o []byte
-	offset := 0
+	offset := int64(0)
+	stringStart := int64(0)
+	prefixWritten := false
+	writeString := func(start int64, value []byte) error {
+		if p.t != "" {
+			if _, err := io.WriteString(w, offsetValue(p.t, start)); err != nil {
+				return err
+			}
+		}
+		if n, err := w.Write(value); err != nil {
+			return err
+		} else if n != len(value) {
+			return io.ErrShortWrite
+		}
+		if _, err := io.WriteString(w, "\n"); err != nil {
+			return err
+		}
+		return nil
+	}
+	finishString := func() error {
+		if len(o) < p.n {
+			return nil
+		}
+		if prefixWritten {
+			if n, err := w.Write(o); err != nil {
+				return err
+			} else if n != len(o) {
+				return io.ErrShortWrite
+			}
+			if _, err := io.WriteString(w, "\n"); err != nil {
+				return err
+			}
+			return nil
+		}
+		return writeString(stringStart, o)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -86,12 +121,8 @@ func stringsIO(ctx context.Context, r *bufio.Reader, w io.Writer, p params) erro
 		}
 		b, err := r.ReadByte()
 		if err == io.EOF {
-			if len(o) >= p.n {
-				if p.t != "" {
-					_, _ = w.Write([]byte(offsetValue(p.t, offset-len(o))))
-				}
-				_, _ = w.Write(o)
-				_, _ = w.Write([]byte{'\n'})
+			if err := finishString(); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -99,19 +130,29 @@ func stringsIO(ctx context.Context, r *bufio.Reader, w io.Writer, p params) erro
 			return err
 		}
 		if !asciiIsPrint(b) {
-			if len(o) >= p.n {
-				if p.t != "" {
-					_, _ = w.Write([]byte(offsetValue(p.t, offset-len(o))))
-				}
-				_, _ = w.Write(o)
-				_, _ = w.Write([]byte{'\n'})
+			if err := finishString(); err != nil {
+				return err
 			}
 			o = o[:0]
+			prefixWritten = false
 			offset++
+			stringStart = offset
 			continue
 		}
 		if len(o) >= p.n+1024 {
-			_, _ = w.Write(o[:1024])
+			if !prefixWritten && p.t != "" {
+				if _, err := io.WriteString(w, offsetValue(p.t, stringStart)); err != nil {
+					return err
+				}
+				prefixWritten = true
+			}
+			n, err := w.Write(o[:1024])
+			if err != nil {
+				return err
+			}
+			if n != 1024 {
+				return io.ErrShortWrite
+			}
 			o = o[1024:]
 		}
 		o = append(o, b)

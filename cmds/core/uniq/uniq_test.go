@@ -6,6 +6,7 @@ package uniq
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"testing/iotest"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestUniq(t *testing.T) {
@@ -145,4 +148,78 @@ func TestUniq(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainSkipFieldsAndCharacters(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		args  []string
+		input string
+		want  string
+	}{
+		{
+			name:  "skip first field",
+			args:  []string{"-f", "1"},
+			input: "one same\n two same\nthree other\n",
+			want:  "one same\nthree other\n",
+		},
+		{
+			name:  "skip first character",
+			args:  []string{"-s", "1"},
+			input: "xapple\nyapple\nzberry\n",
+			want:  "xapple\nzberry\n",
+		},
+		{
+			name:  "skip fields and characters",
+			args:  []string{"-f", "1", "-s", "1", "-i"},
+			input: "1 Aalpha\n2 AALPHA\n3 Bbeta\n",
+			want:  "1 Aalpha\n3 Bbeta\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdin:  strings.NewReader(tt.input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, tt.args...)
+			if code != 0 {
+				t.Fatalf("uniq exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Errorf("uniq output = %q, want %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestUniqLongLine(t *testing.T) {
+	line := strings.Repeat("x", 128*1024)
+	var stdout bytes.Buffer
+	if err := uniqReader(context.Background(), strings.NewReader(line+"\n"+line+"\n"), &stdout, false, false, false, bytes.Equal, 0, 0); err != nil {
+		t.Fatalf("uniqReader returned error: %v", err)
+	}
+	if stdout.String() != line+"\n" {
+		t.Fatalf("uniq output length = %d, want %d", stdout.Len(), len(line)+1)
+	}
+}
+
+func TestUniqWriteError(t *testing.T) {
+	err := errors.New("write failed")
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("line\n"),
+		Stdout: testErrorWriter{err: err},
+		Stderr: io.Discard,
+	})
+	if code == 0 {
+		t.Fatal("uniq returned success after output failure")
+	}
+}
+
+type testErrorWriter struct {
+	err error
+}
+
+func (w testErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

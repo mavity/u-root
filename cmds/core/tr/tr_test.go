@@ -6,8 +6,13 @@ package tr
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestUnescape(t *testing.T) {
@@ -107,8 +112,9 @@ func TestTR(t *testing.T) {
 		},
 		{
 			name:       "delete_alnum",
-			args:       []string{"[:alnum:]", "\uFFFD"},
+			args:       []string{"[:alnum:]"},
 			input:      "0123456789abcdEFGH",
+			del:        true,
 			wantOutput: "",
 		},
 		{
@@ -164,4 +170,84 @@ func TestTR(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainDeleteComplementAndSqueeze(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		args  []string
+		input string
+		want  string
+	}{
+		{
+			name:  "delete",
+			args:  []string{"-d", "a"},
+			input: "banana",
+			want:  "bnn",
+		},
+		{
+			name:  "delete and squeeze",
+			args:  []string{"-d", "-s", "a"},
+			input: "baaaannna",
+			want:  "bnnn",
+		},
+		{
+			name:  "complement translation",
+			args:  []string{"-c", "ab", "XY"},
+			input: "abcda",
+			want:  "XYYYX",
+		},
+		{
+			name:  "complement deletion",
+			args:  []string{"-C", "-d", "a"},
+			input: "banana",
+			want:  "aaa",
+		},
+		{
+			name:  "squeeze only translation output set",
+			args:  []string{"-s", "a", "X"},
+			input: "aaaabbbb",
+			want:  "Xbbbb",
+		},
+		{
+			name:  "preserve a literal replacement character",
+			args:  []string{"a", "x"},
+			input: "a\uFFFD",
+			want:  "x\uFFFD",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdin:  strings.NewReader(tt.input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, tt.args...)
+			if code != 0 {
+				t.Fatalf("tr exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Errorf("tr output = %q, want %q", stdout.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestMainPropagatesOutputError(t *testing.T) {
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("x"),
+		Stdout: trErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	}, "x", "y")
+	if code == 0 {
+		t.Fatal("tr returned success after output failure")
+	}
+}
+
+type trErrorWriter struct {
+	err error
+}
+
+func (w trErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

@@ -23,17 +23,29 @@ import (
 var ErrUsage = errors.New("comm: comm [-123h] file1 file2")
 
 func readLines(ctx context.Context, r io.Reader) ([]string, error) {
-	scanner := bufio.NewScanner(r)
+	reader := bufio.NewReader(r)
 	var lines []string
-	for scanner.Scan() {
+	for {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
-		lines = append(lines, strings.TrimRight(scanner.Text(), "\r\n"))
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			if strings.HasSuffix(line, "\n") {
+				line = strings.TrimSuffix(line, "\n")
+				line = strings.TrimSuffix(line, "\r")
+			}
+			lines = append(lines, line)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return lines, nil
+			}
+			return nil, err
+		}
 	}
-	return lines, scanner.Err()
 }
 
 func openStream(ioEnv core.IO, arg string) (io.Reader, io.Closer, error) {
@@ -120,7 +132,9 @@ func runComm(ctx context.Context, ioEnv core.IO, s1, s2, s3, help bool, args ...
 			line += col3
 		}
 		if line != "\t\t" {
-			fmt.Fprintln(ioEnv.Stdout, strings.TrimRight(line, "\t"))
+			if _, err := fmt.Fprintln(ioEnv.Stdout, strings.TrimRight(line, "\t")); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

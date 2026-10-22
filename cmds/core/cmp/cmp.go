@@ -41,7 +41,7 @@ func readFileOrStdin(ioEnv core.IO, name string) (io.Reader, io.Closer, int64, e
 	return f, f, 0, nil
 }
 
-func runCmp(ctx context.Context, ioEnv core.IO, long, line, silent bool, args ...string) error {
+func runCmp(ctx context.Context, ioEnv core.IO, long, line, silent bool, maxBytes int64, args ...string) error {
 	var offset [2]int64
 	cmpUnits := unit.DefaultUnits
 
@@ -84,7 +84,7 @@ func runCmp(ctx context.Context, ioEnv core.IO, long, line, silent bool, args ..
 		return ErrArgCount
 	}
 
-	readers := make([]io.Reader, 2)
+	readers := make([]*bufio.Reader, 2)
 	for i := 0; i < 2; i++ {
 		r, cl, _, err := readFileOrStdin(ioEnv, args[i])
 		if err != nil {
@@ -106,54 +106,84 @@ func runCmp(ctx context.Context, ioEnv core.IO, long, line, silent bool, args ..
 	}
 
 	lineno, charno := int64(1), int64(1)
+	differ := false
 
 	for {
+		if maxBytes >= 0 && charno > maxBytes {
+			if differ {
+				return ErrDiffer
+			}
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		var b [2]byte
-		_, err1 := readers[0].Read(b[:1])
-		_, err2 := readers[1].Read(b[1:2])
+		b1, err1 := readers[0].ReadByte()
+		b2, err2 := readers[1].ReadByte()
 
 		if err1 != nil || err2 != nil {
 			if err1 == io.EOF && err2 == io.EOF {
+				if differ {
+					return ErrDiffer
+				}
 				return nil
 			}
-			if err1 != nil {
+			if err1 != nil && err1 != io.EOF {
 				if ioEnv.Stderr != nil {
 					fmt.Fprintf(ioEnv.Stderr, "%s:%v", args[0], err1)
 				}
 				return err1
 			}
-			if err2 != nil {
+			if err2 != nil && err2 != io.EOF {
 				if ioEnv.Stderr != nil {
 					fmt.Fprintf(ioEnv.Stderr, "%s:%v", args[1], err2)
 				}
 				return err2
 			}
-		}
-
-		b1, b2 := b[0], b[1]
-		if b1 != b2 {
 			if silent {
 				return ErrDiffer
 			}
 			if line {
 				if ioEnv.Stdout != nil {
-					fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d line %d", args[0], args[1], charno, lineno)
+					if _, err := fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d line %d", args[0], args[1], charno, lineno); err != nil {
+						return err
+					}
+				}
+			} else if !long && ioEnv.Stdout != nil {
+				if _, err := fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d", args[0], args[1], charno); err != nil {
+					return err
+				}
+			}
+			return ErrDiffer
+		}
+
+		if b1 != b2 {
+			differ = true
+			if silent {
+				return ErrDiffer
+			}
+			if line {
+				if ioEnv.Stdout != nil {
+					if _, err := fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d line %d", args[0], args[1], charno, lineno); err != nil {
+						return err
+					}
 				}
 				return ErrDiffer
 			}
 			if long {
 				if ioEnv.Stdout != nil {
-					fmt.Fprintf(ioEnv.Stdout, "%8d %#.2o %#.2o\n", charno, b1, b2)
+					if _, err := fmt.Fprintf(ioEnv.Stdout, "%8d %#.2o %#.2o\n", charno, b1, b2); err != nil {
+						return err
+					}
 				}
 			} else {
 				if ioEnv.Stdout != nil {
-					fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d", args[0], args[1], charno)
+					if _, err := fmt.Fprintf(ioEnv.Stdout, "%s %s: char %d", args[0], args[1], charno); err != nil {
+						return err
+					}
 				}
 				return ErrDiffer
 			}
@@ -172,7 +202,7 @@ func cmp(stdout, stderr io.Writer, long, line, silent bool, args ...string) erro
 		Stdout: stdout,
 		Stderr: stderr,
 	}
-	err := runCmp(context.Background(), ioEnv, long, line, silent, args...)
+	err := runCmp(context.Background(), ioEnv, long, line, silent, -1, args...)
 	if silent && errors.Is(err, ErrDiffer) {
 		return nil
 	}
@@ -189,15 +219,18 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var (
-		long   bool
-		line   bool
-		silent bool
+		long     bool
+		line     bool
+		silent   bool
+		maxBytes int64
 	)
+	maxBytes = -1
 	fs := flag.NewFlagSet("cmp", flag.ContinueOnError)
 	fs.SetOutput(ioEnv.Stderr)
 	fs.BoolVar(&long, "l", false, "print the byte number (decimal) and the differing bytes (hexadecimal) for each difference")
 	fs.BoolVar(&line, "L", false, "print the line number of the first differing byte")
 	fs.BoolVar(&silent, "s", false, "print nothing for differing files, but set the exit status")
+	fs.Int64Var(&maxBytes, "n", -1, "compare at most N bytes")
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -206,7 +239,17 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 2
 	}
 
-	err := runCmp(ctx, ioEnv, long, line, silent, fs.Args()...)
+	maxBytesSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "n" {
+			maxBytesSet = true
+		}
+	})
+	if maxBytesSet && maxBytes < 0 {
+		fmt.Fprintln(ioEnv.Stderr, "cmp: byte count must not be negative")
+		return 2
+	}
+	err := runCmp(ctx, ioEnv, long, line, silent, maxBytes, fs.Args()...)
 	if err == nil {
 		return 0
 	}

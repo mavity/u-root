@@ -6,10 +6,15 @@ package comm
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestComm(t *testing.T) {
@@ -103,4 +108,64 @@ func TestComm(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainReadsStdinAndLongLines(t *testing.T) {
+	dir := t.TempDir()
+	second := filepath.Join(dir, "second.txt")
+	if err := os.WriteFile(second, []byte("alpha\nomega\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader("alpha\nmiddle\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Dir:    dir,
+	}, "-", "second.txt")
+	if code != 0 {
+		t.Fatalf("comm exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "\t\talpha\nmiddle\n\tomega\n"; got != want {
+		t.Errorf("comm output = %q, want %q", got, want)
+	}
+
+	longLine := strings.Repeat("x", 128*1024) + "\r"
+	lines, err := readLines(context.Background(), strings.NewReader(longLine))
+	if err != nil {
+		t.Fatalf("readLines returned error: %v", err)
+	}
+	if len(lines) != 1 || lines[0] != longLine {
+		t.Errorf("readLines did not preserve long final line and carriage return")
+	}
+}
+
+func TestMainPropagatesOutputError(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.txt")
+	second := filepath.Join(dir, "second.txt")
+	if err := os.WriteFile(first, []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	code := Main(context.Background(), core.IO{
+		Stdin:  strings.NewReader(""),
+		Stdout: commErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	}, first, second)
+	if code == 0 {
+		t.Fatal("comm returned success after output failure")
+	}
+}
+
+type commErrorWriter struct {
+	err error
+}
+
+func (w commErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

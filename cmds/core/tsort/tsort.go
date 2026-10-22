@@ -66,6 +66,8 @@ import (
 	"io"
 	"os"
 	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
@@ -119,8 +121,10 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
 	return runWithCtx(context.Background(), stdin, stdout, stderr, args...)
 }
 
-func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) error {
-	var err error
+func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, args ...string) (retErr error) {
+	if len(args) > 1 {
+		return fmt.Errorf("expected at most one input file")
+	}
 	in := io.NopCloser(stdin)
 	if len(args) >= 1 && args[0] != "-" {
 		f, openErr := os.Open(args[0])
@@ -129,55 +133,100 @@ func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 		}
 		in = f
 	}
-	defer in.Close()
+	defer func() {
+		if err := in.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+	}()
 
 	g := newGraph()
-	if err = parseInto(ctx, in, g); err != nil {
+	if err := parseInto(ctx, in, g); err != nil {
 		return err
 	}
 
+	var outputErr error
 	topologicalOrdering(
 		g,
 		func(node nodeID) {
-			_, _ = fmt.Fprintln(stdout, g.valueFor(node))
+			if outputErr == nil {
+				_, outputErr = fmt.Fprintln(stdout, g.valueFor(node))
+			}
 		},
 		func(cycle []nodeID) {
-			_, _ = fmt.Fprintln(stderr, "tsort: cycle in data")
-			for _, node := range cycle {
-				_, _ = fmt.Fprintln(stderr, "tsort:", g.valueFor(node))
+			if outputErr == nil {
+				_, outputErr = fmt.Fprintln(stderr, "tsort: cycle in data")
 			}
-			err = errNonFatal
+			for _, node := range cycle {
+				if outputErr == nil {
+					_, outputErr = fmt.Fprintln(stderr, "tsort:", g.valueFor(node))
+				}
+			}
+			if outputErr == nil {
+				retErr = errNonFatal
+			}
 		})
-	return err
+	if outputErr != nil {
+		return outputErr
+	}
+	return retErr
 }
 
 func parseInto(ctx context.Context, in io.Reader, g *graph) error {
-	scanner := bufio.NewScanner(in)
-	scanner.Split(bufio.ScanWords)
-
-	for scanner.Scan() {
+	reader := bufio.NewReader(in)
+	var token strings.Builder
+	var first string
+	haveFirst := false
+	consumeToken := func() {
+		if token.Len() == 0 {
+			return
+		}
+		value := token.String()
+		token.Reset()
+		if !haveFirst {
+			first = value
+			haveFirst = true
+		} else if first == value {
+			g.addNode(first)
+			haveFirst = false
+		} else {
+			g.putEdge(first, value)
+			haveFirst = false
+		}
+	}
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
-		a := scanner.Text()
-		if !scanner.Scan() {
-			if err := scanner.Err(); err != nil {
+		r, size, err := reader.ReadRune()
+		if err != nil {
+			if err != io.EOF {
 				return err
 			}
-			return errOddDataCount
+			consumeToken()
+			if haveFirst {
+				return errOddDataCount
+			}
+			return nil
 		}
-
-		b := scanner.Text()
-		if a == b {
-			g.addNode(a)
+		if unicode.IsSpace(r) {
+			consumeToken()
+		} else if r == unicode.ReplacementChar && size == 1 {
+			if err := reader.UnreadRune(); err != nil {
+				return err
+			}
+			b, err := reader.ReadByte()
+			if err != nil {
+				return err
+			}
+			if err := token.WriteByte(b); err != nil {
+				return err
+			}
 		} else {
-			g.putEdge(a, b)
+			token.WriteRune(r)
 		}
 	}
-
-	return scanner.Err()
 }
 
 func topologicalOrdering(

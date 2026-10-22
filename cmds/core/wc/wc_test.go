@@ -6,11 +6,14 @@ package wc
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestFiles(t *testing.T) {
@@ -149,4 +152,38 @@ func TestStdin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMainCharacterAndLongestLineFlags(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  bytes.NewBufferString("hello\nMünchen\nlast"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-m", "-L")
+	if code != 0 {
+		t.Fatalf("wc exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "18 7\n"; got != want {
+		t.Errorf("wc output = %q, want %q", got, want)
+	}
+}
+
+func TestMainPropagatesOutputError(t *testing.T) {
+	code := Main(context.Background(), core.IO{
+		Stdin:  bytes.NewBufferString("line\n"),
+		Stdout: wcErrorWriter{err: errors.New("write failed")},
+		Stderr: io.Discard,
+	}, "-l")
+	if code == 0 {
+		t.Fatal("wc returned success after output failure")
+	}
+}
+
+type wcErrorWriter struct {
+	err error
+}
+
+func (w wcErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
 }

@@ -6,12 +6,14 @@ package cmp
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestCmp(t *testing.T) {
@@ -107,6 +109,7 @@ func TestCmp(t *testing.T) {
 			file1:  "hello\nthis is a test",
 			file2:  "hello\nthiz is a text",
 			long:   true,
+			err:    ErrDiffer,
 			stdout: fmt.Sprintf("%8d %#.2o %#.2o\n%8d %#.2o %#.2o\n", 10, 0o163, 0o172, 19, 0o163, 0o170),
 		},
 		{
@@ -115,9 +118,8 @@ func TestCmp(t *testing.T) {
 			file1:  "hello\nthis is a tes",
 			file2:  "hello\nthiz is a text",
 			long:   true,
-			err:    io.EOF,
+			err:    ErrDiffer,
 			stdout: fmt.Sprintf("%8d %#.2o %#.2o\n%8d %#.2o %#.2o\n", 10, 0o163, 0o172, 19, 0o163, 0o170),
-			stderr: fmt.Sprintf("%s:%v", filepath.Join(tmpdir, "file1"), io.EOF),
 		},
 		{
 			name:   "cmp two files, flag long = true, second file ends first",
@@ -125,9 +127,8 @@ func TestCmp(t *testing.T) {
 			file1:  "hello\nthis is a test",
 			file2:  "hello\nthiz is a tex",
 			long:   true,
-			err:    io.EOF,
+			err:    ErrDiffer,
 			stdout: fmt.Sprintf("%8d %#.2o %#.2o\n%8d %#.2o %#.2o\n", 10, 0o163, 0o172, 19, 0o163, 0o170),
-			stderr: fmt.Sprintf("%s:%v", filepath.Join(tmpdir, "file2"), io.EOF),
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -152,5 +153,45 @@ func TestCmp(t *testing.T) {
 				t.Errorf("cmp():stderr:got %s, want %s", stderr.String(), tt.stderr)
 			}
 		})
+	}
+}
+
+func TestMainByteLimitAndLengthDifference(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	second := filepath.Join(dir, "second")
+	if err := os.WriteFile(first, []byte("same"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("same-and-longer"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-n", "3", first, second)
+	if code != 0 {
+		t.Fatalf("cmp equal prefix exit code = %d, want 0; stderr = %q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Main(context.Background(), core.IO{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, first, second)
+	if code != 1 {
+		t.Fatalf("cmp different lengths exit code = %d, want 1; stderr = %q", code, stderr.String())
+	}
+
+	stdout.Reset()
+	code = Main(context.Background(), core.IO{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-n", "0", first, second)
+	if code != 0 {
+		t.Fatalf("cmp zero-byte limit exit code = %d, want 0; stderr = %q", code, stderr.String())
 	}
 }

@@ -13,17 +13,66 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
 
-func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string) error {
+type offsetWriter struct {
+	writer io.Writer
+	offset uint64
+	line   []byte
+}
+
+func (w *offsetWriter) writeLine() error {
+	line := w.line
+	if len(line) >= 8 {
+		if base, err := strconv.ParseUint(string(line[:8]), 16, 64); err == nil {
+			prefix := []byte(fmt.Sprintf("%08x", base+w.offset))
+			line = append(prefix, line[8:]...)
+		}
+	}
+	line = append(line, '\n')
+	n, err := w.writer.Write(line)
+	if err != nil {
+		return err
+	}
+	if n != len(line) {
+		return io.ErrShortWrite
+	}
+	w.line = w.line[:0]
+	return nil
+}
+
+func (w *offsetWriter) Write(p []byte) (int, error) {
+	for i, b := range p {
+		if b == '\n' {
+			if err := w.writeLine(); err != nil {
+				return i + 1, err
+			}
+			continue
+		}
+		w.line = append(w.line, b)
+	}
+	return len(p), nil
+}
+
+func (w *offsetWriter) Close() error {
+	if len(w.line) == 0 {
+		return nil
+	}
+	return w.writeLine()
+}
+
+func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string, maxBytes, skip int64) (retErr error) {
 	var readers []io.Reader
 	var closers []io.Closer
 	defer func() {
 		for _, c := range closers {
-			_ = c.Close()
+			if err := c.Close(); retErr == nil && err != nil {
+				retErr = err
+			}
 		}
 	}()
 
@@ -52,8 +101,29 @@ func runHexdump(ctx context.Context, ioEnv core.IO, filenames []string) error {
 	}
 
 	r := io.MultiReader(readers...)
-	w := hex.Dumper(ioEnv.Stdout)
-	defer w.Close()
+	if skip > 0 {
+		_, err := io.CopyN(io.Discard, r, skip)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+	}
+	if maxBytes >= 0 {
+		r = io.LimitReader(r, maxBytes)
+	}
+
+	adjusted := &offsetWriter{writer: ioEnv.Stdout, offset: uint64(skip)}
+	w := hex.Dumper(adjusted)
+	defer func() {
+		if err := w.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+		if err := adjusted.Close(); retErr == nil && err != nil {
+			retErr = err
+		}
+	}()
 
 	buf := make([]byte, 32*1024)
 	for {
@@ -89,7 +159,7 @@ func hexdump(filenames []string, reader io.Reader, writer io.Writer) error {
 		Stdin:  reader,
 		Stdout: writer,
 	}
-	return runHexdump(context.Background(), ioEnv, filenames)
+	return runHexdump(context.Background(), ioEnv, filenames, -1, 0)
 }
 
 // Main runs the hexdump command.
@@ -101,10 +171,19 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	var canonical bool
+	var (
+		canonical bool
+		verbose   bool
+		maxBytes  int64
+		skip      int64
+	)
+	maxBytes = -1
 	fs := flag.NewFlagSet("hexdump", flag.ContinueOnError)
 	fs.SetOutput(ioEnv.Stderr)
 	fs.BoolVar(&canonical, "C", false, "canonical hex+ASCII display")
+	fs.BoolVar(&verbose, "v", false, "do not suppress repeated output lines")
+	fs.Int64Var(&maxBytes, "n", -1, "interpret only N bytes of input")
+	fs.Int64Var(&skip, "s", 0, "skip N bytes from the beginning")
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -113,7 +192,13 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 2
 	}
 
-	if err := runHexdump(ctx, ioEnv, fs.Args()); err != nil {
+	if maxBytes < -1 || skip < 0 {
+		fmt.Fprintln(ioEnv.Stderr, "hexdump: byte counts must not be negative")
+		return 2
+	}
+	_ = canonical
+	_ = verbose
+	if err := runHexdump(ctx, ioEnv, fs.Args(), maxBytes, skip); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return 130
 		}

@@ -124,43 +124,54 @@ func runSeq(ctx context.Context, w io.Writer, format string, separator string, w
 		s1.incr = -1
 	}
 
-	format = strings.Replace(s1.format, "%", "%0*", 1) // support widthEqual
+	format = s1.format
 	var width int
 	if widthEqual {
-		width = len(fmt.Sprintf(format, 0, s1.last))
+		format = strings.Replace(format, "%", "%0*", 1)
+		width = max(
+			len(fmt.Sprintf(format, 0, s1.first)),
+			len(fmt.Sprintf(format, 0, s1.last)),
+		)
 	}
 
-	if s1.first < s1.last {
-		for s1.first <= s1.last {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			fmt.Fprintf(w, format, width, s1.first)
-			s1.first += s1.incr
-			if s1.first <= s1.last {
-				fmt.Fprint(w, separator)
-			}
+	inRange := func(value float64) bool {
+		if s1.incr > 0 {
+			return value <= s1.last
 		}
-	} else if s1.first > s1.last {
-		for s1.first >= s1.last {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-			fmt.Fprintf(w, format, width, s1.first)
-			s1.first += s1.incr
-			if s1.first >= s1.last {
-				fmt.Fprint(w, separator)
-			}
-		}
-	} else {
-		fmt.Fprintf(w, format, width, s1.first)
+		return value >= s1.last
 	}
 
-	fmt.Fprint(w, "\n")
+	first := true
+	for value := s1.first; inRange(value); {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		if !first {
+			if _, err := fmt.Fprint(w, separator); err != nil {
+				return err
+			}
+		}
+		var err error
+		if widthEqual {
+			_, err = fmt.Fprintf(w, format, width, value)
+		} else {
+			_, err = fmt.Fprintf(w, format, value)
+		}
+		if err != nil {
+			return err
+		}
+		first = false
+		next := value + s1.incr
+		if next == value && value != s1.last {
+			return errors.New("sequence increment is too small to advance")
+		}
+		value = next
+	}
+	if _, err := fmt.Fprint(w, "\n"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -189,7 +200,16 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	fs.StringVar(&separator, "s", "\n", "use STRING to separate numbers")
 	fs.BoolVar(&widthEqual, "w", false, "equalize width by padding with leading zeroes")
 
-	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
+	flagArgs := args
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			if _, err := strconv.ParseFloat(arg, 64); err == nil {
+				flagArgs = append(append(append([]string(nil), args[:i]...), "--"), args[i:]...)
+				break
+			}
+		}
+	}
+	if err := fs.Parse(unixflag.ArgsToGoArgs(flagArgs)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
