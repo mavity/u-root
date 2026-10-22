@@ -20,6 +20,13 @@ func collect(path string) ([]proc, error) {
 	return collectSystemProcesses()
 }
 
+func fallbackProcessName(goos, executable string) string {
+	if goos == "wasip1" {
+		return "rusticated"
+	}
+	return executable
+}
+
 func collectDir(path string) ([]proc, error) {
 	entries, err := os.ReadDir(path)
 	if err != nil {

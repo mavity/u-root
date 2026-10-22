@@ -8,6 +8,7 @@ package pidof
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 )
 
@@ -17,6 +18,6 @@ func collectSystemProcesses() ([]proc, error) {
 	}
 	pid := strconv.Itoa(os.Getpid())
 	return []proc{
-		{comm: os.Args[0], pid: pid},
+		{comm: fallbackProcessName(runtime.GOOS, os.Args[0]), pid: pid},
 	}, nil
 }

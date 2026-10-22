@@ -17,6 +17,22 @@ import (
 	"github.com/u-root/u-root/pkg/core"
 )
 
+func TestFallbackProcessName(t *testing.T) {
+	tests := []struct {
+		goos       string
+		executable string
+		want       string
+	}{
+		{goos: "wasip1", executable: "guest.wasm", want: "rusticated"},
+		{goos: "darwin", executable: "/usr/local/bin/kabibi", want: "/usr/local/bin/kabibi"},
+	}
+	for _, tt := range tests {
+		if got := fallbackProcessName(tt.goos, tt.executable); got != tt.want {
+			t.Errorf("fallbackProcessName(%q, %q) = %q, want %q", tt.goos, tt.executable, got, tt.want)
+		}
+	}
+}
+
 func TestPidof(t *testing.T) {
 	tests := []struct {
 		name        string
