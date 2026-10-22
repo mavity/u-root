@@ -104,7 +104,9 @@ func ddWithCtx(ctx context.Context, r io.Reader, w io.Writer, inBufSize, outBufS
 		default:
 		}
 		for int64(dat.Len()) > outBufSize {
-			if _, err := io.CopyN(w, dat, outBufSize); err != nil {
+			n, err := io.CopyN(w, dat, outBufSize)
+			*bytesWritten += int64(n)
+			if err != nil {
 				return err
 			}
 		}
@@ -121,7 +123,9 @@ func ddWithCtx(ctx context.Context, r io.Reader, w io.Writer, inBufSize, outBufS
 			return ctx.Err()
 		default:
 		}
-		if _, err := io.CopyN(w, dat, outBufSize); err != nil && err != io.EOF {
+		n, err := io.CopyN(w, dat, outBufSize)
+		*bytesWritten += int64(n)
+		if err != nil && err != io.EOF {
 			return err
 		}
 	}

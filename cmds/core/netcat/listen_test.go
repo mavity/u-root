@@ -7,6 +7,7 @@ package netcat
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -112,11 +113,38 @@ func TestListenMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cmd := &cmd{}
-			err := cmd.listenMode(&closableDiscard{}, tt.network, tt.address, tt.listenFunc)
+			err := cmd.listenMode(context.Background(), &closableDiscard{}, tt.network, tt.address, tt.listenFunc)
 			if !errors.Is(err, tt.err) {
 				t.Errorf("got %v, want %v", err, tt.err)
 			}
 		})
+	}
+}
+
+func TestListenModeContextCancellationClosesListener(t *testing.T) {
+	config := netcat.DefaultConfig()
+	config.ConnectionMode = netcat.CONNECTION_MODE_LISTEN
+	config.Host = "127.0.0.1"
+	config.Port = 0
+	cmd := &cmd{config: &config}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.listenMode(ctx, &closableDiscard{}, "tcp", "127.0.0.1:0", func(output io.WriteCloser, network, address string) error {
+			return cmd.listen(ctx, output, network, address)
+		})
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("listenMode() error = %v, want nil after cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listenMode() did not stop after context cancellation")
 	}
 }
 
@@ -776,6 +804,12 @@ func TestParseRemoteAddr(t *testing.T) {
 			name:        "IP",
 			remoteAddr:  "127.0.0.1",
 			wantAddress: []string{"127.0.0.1"},
+		},
+		{
+			socketType:  netcat.SOCKET_TYPE_TCP,
+			name:        "empty address",
+			remoteAddr:  "",
+			wantAddress: []string{""},
 		},
 		{
 			socketType:  netcat.SOCKET_TYPE_TCP,

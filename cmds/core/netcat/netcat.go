@@ -564,7 +564,9 @@ func runWithIO(ctx context.Context, ioEnv core.IO, args []string) error {
 	}()
 
 	if c.config.ConnectionMode == netcat.CONNECTION_MODE_LISTEN {
-		return c.listenMode(netcat.NewConcurrentWriteCloser(output), network, address, c.listen)
+		return c.listenMode(ctx, netcat.NewConcurrentWriteCloser(output), network, address, func(output io.WriteCloser, network, address string) error {
+			return c.listen(ctx, output, network, address)
+		})
 	}
 
 	return c.connectMode(output, network, address, c.connect)

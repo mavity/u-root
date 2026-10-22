@@ -7,6 +7,7 @@ package netcat
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -24,14 +25,24 @@ var osListeners = map[netcat.SocketType]func(string, string) (net.Listener, erro
 
 type listenFn func(output io.WriteCloser, network, address string) error
 
-func (c *cmd) listenMode(output io.WriteCloser, network, address string, listen listenFn) error {
+func (c *cmd) listenMode(ctx context.Context, output io.WriteCloser, network, address string, listen listenFn) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+
 	if network == "tcp" || network == "udp" {
 		err4 := listen(output, network+"4", address)
 		if err4 == nil {
 			return nil
 		}
+		if ctx.Err() != nil {
+			return nil
+		}
 		err6 := listen(output, network+"6", address)
 		if err6 == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
 			return nil
 		}
 		return fmt.Errorf("listen mode: %w", errors.Join(err4, err6))
@@ -40,13 +51,28 @@ func (c *cmd) listenMode(output io.WriteCloser, network, address string, listen 
 	return listen(output, network, address)
 }
 
-func (c *cmd) listen(output io.WriteCloser, network, address string) error {
+func (c *cmd) listen(ctx context.Context, output io.WriteCloser, network, address string) error {
 	listener, err := c.setupListener(network, address)
 	if err != nil {
 		return fmt.Errorf("failed to setup listener: %w", err)
 	}
+	defer listener.Close()
 
-	return c.listenForConnections(output, listener, 0)
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = listener.Close()
+		case <-done:
+		}
+	}()
+
+	err = c.listenForConnections(output, listener, 0)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // setupListener initializes a network listener based on the configuration provided in the cmd struct.
@@ -429,6 +455,10 @@ func parseRemoteAddr(socketType netcat.SocketType, remoteAddr string) []string {
 			// If the address is not in the format host:port, use the original remoteAddr as the host
 		} else {
 			host = remoteAddr
+		}
+
+		if host == "" {
+			return addresses
 		}
 
 		// Perform a reverse lookup to get the domain names associated with the host.

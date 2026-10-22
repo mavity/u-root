@@ -165,6 +165,14 @@ func (f file) String() string {
 	return f.url.String()
 }
 
+// Close closes the underlying reader when it holds resources.
+func (f file) Close() error {
+	if closer, ok := f.Reader.(io.Closer); ok {
+		return closer.Close()
+	}
+	return nil
+}
+
 // Fetch fetches the file with the given `u`. `u.Scheme` is used to
 // select the FileScheme via `s`.
 //

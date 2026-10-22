@@ -98,7 +98,7 @@ func command(args ...string) (*cmd, error) {
 	}, nil
 }
 
-func (c *cmd) runWithIO(ctx context.Context, ioEnv core.IO) error {
+func (c *cmd) runWithIO(ctx context.Context, ioEnv core.IO) (retErr error) {
 	if c.url == "" {
 		return errEmptyURL
 	}
@@ -125,22 +125,25 @@ func (c *cmd) runWithIO(ctx context.Context, ioEnv core.IO) error {
 	if err != nil {
 		return fmt.Errorf("failed to download %v: %w", c.url, err)
 	}
+	if closer, ok := reader.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("close downloaded content: %w", err)
+			}
+		}()
+	}
 
 	if c.outputPath == "-" {
 		out := ioEnv.Stdout
 		if out == nil {
 			out = os.Stdout
 		}
-		_, err := io.Copy(out, reader)
-		return err
+		_, retErr = io.Copy(out, reader)
+		return retErr
 	}
 
 	targetPath := ioEnv.ResolvePath(c.outputPath)
-	if err := uio.ReadIntoFile(reader, targetPath); err != nil {
-		return err
-	}
-
-	return nil
+	return uio.ReadIntoFile(reader, targetPath)
 }
 
 func (c *cmd) run() error {

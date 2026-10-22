@@ -10,6 +10,8 @@
 package wget
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/curl"
 )
 
@@ -195,6 +198,51 @@ func TestNoServer(t *testing.T) {
 	}
 	if err := c.run(); err == nil {
 		t.Fatalf("run:got nil, want err")
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type closeTrackingReader struct {
+	io.Reader
+	closed bool
+}
+
+func (r *closeTrackingReader) Close() error {
+	r.closed = true
+	return nil
+}
+
+func TestRunWithIOClosesDownloadedReader(t *testing.T) {
+	body := &closeTrackingReader{Reader: strings.NewReader(content)}
+	originalHTTPClient := curl.DefaultHTTPClient
+	curl.DefaultHTTPClient = curl.NewHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       body,
+				Header:     make(http.Header),
+			}, nil
+		}),
+	})
+	t.Cleanup(func() {
+		curl.DefaultHTTPClient = originalHTTPClient
+	})
+
+	var stdout bytes.Buffer
+	c := &cmd{url: "https://example.test/file", outputPath: "-"}
+	if err := c.runWithIO(context.Background(), core.IO{Stdout: &stdout}); err != nil {
+		t.Fatalf("runWithIO() error = %v", err)
+	}
+	if !body.closed {
+		t.Fatal("downloaded response body was not closed")
+	}
+	if stdout.String() != content {
+		t.Fatalf("stdout = %q, want %q", stdout.String(), content)
 	}
 }
 

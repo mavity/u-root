@@ -7,6 +7,7 @@ package dd
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -607,6 +608,51 @@ func TestBS(t *testing.T) {
 			var bw int64
 			if err := dd(&tt, &tt, tt.ibs, tt.obs, &bw); !errors.Is(err, tt.err) {
 				t.Fatalf("got %v, want %v", err, tt.err)
+			}
+		})
+	}
+}
+
+func TestDdWithCtxCountsBytesForDifferentBlockSizes(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		inputSize  int64
+		outputSize int64
+		input      string
+	}{
+		{
+			name:       "input blocks larger than output blocks",
+			inputSize:  3,
+			outputSize: 2,
+			input:      "abcde",
+		},
+		{
+			name:       "output blocks larger than input blocks",
+			inputSize:  2,
+			outputSize: 3,
+			input:      "abcdefg",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var output bytes.Buffer
+			var bytesWritten int64
+
+			err := ddWithCtx(
+				context.Background(),
+				strings.NewReader(tt.input),
+				&output,
+				tt.inputSize,
+				tt.outputSize,
+				&bytesWritten,
+			)
+			if err != nil {
+				t.Fatalf("ddWithCtx() error = %v", err)
+			}
+			if got := output.String(); got != tt.input {
+				t.Fatalf("output = %q, want %q", got, tt.input)
+			}
+			if bytesWritten != int64(len(tt.input)) {
+				t.Fatalf("bytesWritten = %d, want %d", bytesWritten, len(tt.input))
 			}
 		})
 	}
