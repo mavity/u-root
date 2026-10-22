@@ -17,6 +17,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/u-root/u-root/pkg/core"
 	"github.com/u-root/u-root/pkg/uroot/unixflag"
 )
@@ -77,6 +78,31 @@ func invalidCount(p []byte) (n int64) {
 	return
 }
 
+func displayWidth(line []byte) int64 {
+	if len(line) > 0 && line[len(line)-1] == '\n' {
+		line = line[:len(line)-1]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+	}
+
+	width := 0
+	for {
+		tab := bytes.IndexByte(line, '\t')
+		end := len(line)
+		if tab >= 0 {
+			end = tab
+		}
+		width += ansi.GraphemeWidth.StringWidth(string(line[:end]))
+		if tab < 0 {
+			break
+		}
+		width += 8 - width%8
+		line = line[tab+1:]
+	}
+	return int64(width)
+}
+
 func countReader(ctx context.Context, in io.Reader, stderr io.Writer, fname string) (cnt, error) {
 	b := bufio.NewReaderSize(in, 8192)
 	counted := false
@@ -102,16 +128,9 @@ func countReader(ctx context.Context, in io.Reader, stderr io.Writer, fname stri
 			count.lines++
 		}
 		count.words += int64(len(bytes.Fields(line)))
-		lineRunes := utf8.RuneCount(line)
-		if lineRunes > 0 && line[len(line)-1] == '\n' {
-			lineRunes--
-			if len(line) > 1 && line[len(line)-2] == '\r' {
-				lineRunes--
-			}
-		}
 		count.runes += int64(utf8.RuneCount(line))
-		if int64(lineRunes) > count.longestLine {
-			count.longestLine = int64(lineRunes)
+		if lineWidth := displayWidth(line); lineWidth > count.longestLine {
+			count.longestLine = lineWidth
 		}
 		count.chars += int64(len(line))
 		count.badRunes += invalidCount(line)

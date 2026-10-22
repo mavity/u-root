@@ -169,6 +169,40 @@ func TestMainCharacterAndLongestLineFlags(t *testing.T) {
 	}
 }
 
+func TestMainLongestLineDisplayWidth(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "ascii", input: "hello\n", want: "5\n"},
+		{name: "wide character", input: "\u754C\n", want: "2\n"},
+		{name: "tab stop", input: "a\tb\n", want: "9\n"},
+		{name: "tab after column eight", input: "12345678\tx\n", want: "17\n"},
+		{name: "combining grapheme", input: "e\u0301\n", want: "1\n"},
+		{name: "emoji zwj grapheme", input: "\U0001F468\u200D\U0001F469\u200D\U0001F467\u200D\U0001F466\n", want: "2\n"},
+		{name: "ansi styling", input: "\x1b[31m\u754C\x1b[0m\n", want: "2\n"},
+		{name: "crlf", input: "\u754C\r\n", want: "2\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Main(context.Background(), core.IO{
+				Stdin:  bytes.NewBufferString(test.input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+			}, "-L")
+			if code != 0 {
+				t.Fatalf("wc exit code = %d, want 0; stderr = %q", code, stderr.String())
+			}
+			if got := stdout.String(); got != test.want {
+				t.Errorf("wc -L output = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestMainPropagatesOutputError(t *testing.T) {
 	code := Main(context.Background(), core.IO{
 		Stdin:  bytes.NewBufferString("line\n"),
