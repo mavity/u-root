@@ -1,4 +1,4 @@
-// Copyright 2018 the u-root Authors. All rights reserved
+// Copyright 2018 the u-root Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -7,235 +7,201 @@ package tail
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
-func tempFile(t *testing.T, content string) *os.File {
-	t.Helper()
+func TestMain(t *testing.T) {
 	dir := t.TempDir()
-	f, err := os.CreateTemp(dir, "tailRunTest")
-	if err != nil {
+	content := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"
+	if err := os.WriteFile(filepath.Join(dir, "lines.txt"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = f.Close() })
-
-	_, err = f.WriteString(content)
-	if err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("other\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	return f
-}
-
-func TestTailReadBackwards(t *testing.T) {
-	input, err := os.Open("./testdata/read_backwards.txt")
-	if err != nil {
-		t.Error(err)
-	}
-	defer input.Close()
-	output := &bytes.Buffer{}
-	err = readLastLinesBackwards(context.Background(), input, output, 2)
-	if err != nil {
-		t.Error(err)
-	}
-	expected := []byte("second\nthird\n")
-	got := output.Bytes()
-	if !bytes.Equal(got, expected) {
-		t.Fatalf("Invalid result reading backwards. Got %v; want %v", got, expected)
-	}
-	// try reading more, which should return EOF
-	buf := make([]byte, 16)
-	n, err := input.Read(buf)
-	if err == nil {
-		t.Fatalf("Expected EOF, got more bytes instead: %v", string(buf[:n]))
-	}
-	if err != io.EOF {
-		t.Fatalf("Expected EOF, got another error instead: %v", err)
-	}
-}
-
-func TestTailReadFromBeginning(t *testing.T) {
-	input, err := os.Open("./testdata/read_from_beginning.txt")
-	if err != nil {
-		t.Error(err)
-	}
-	defer input.Close()
-	output := &bytes.Buffer{}
-	err = readLastLinesFromBeginning(context.Background(), input, output, 3)
-	if err != nil {
-		t.Error(err)
-	}
-	expected := []byte("eight\nnine\nten\n")
-	got := make([]byte, 4096) // anything larger than the expected result
-	n, err := output.Read(got)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got[:n], expected) {
-		t.Fatalf("Invalid data while reading from the beginning. Got %v; want %v", string(got[:n]), string(expected))
-	}
-	// try reading more, which should return EOF
-	buf := make([]byte, 16)
-	n, err = input.Read(buf)
-	if err == nil {
-		t.Fatalf("Expected EOF, got more bytes instead: %v", string(buf[:n]))
-	}
-	if err != io.EOF {
-		t.Fatalf("Expected EOF, got another error instead: %v", err)
-	}
-}
-
-func TestTailRun(t *testing.T) {
-	input := "a\nb\nc\n"
-	f := tempFile(t, input)
-
-	var b bytes.Buffer
-	err := run(os.Stdin, &b, false, 10, time.Second, []string{f.Name()})
-	if err != nil {
-		t.Error(err)
-	}
-
-	if b.String() != input {
-		t.Errorf("tail output does not match, want %q, got %q", input, b.String())
-	}
-
-	err = run(nil, nil, true, 10, time.Second, []string{"a", "b"})
-	if err == nil {
-		t.Error("tail should return an error if more than one file specified if follow true")
-	}
-
-	b.Truncate(0)
-	err = run(f, &b, false, -1, time.Second, nil)
-	if err != nil {
-		t.Error(err)
-	}
-
-	if b.String() != "c\n" {
-		t.Errorf("tail output does not match, want %q, got %q", input, b.String())
-	}
-}
-
-func TestTailMultipleFiles(t *testing.T) {
-	f1 := tempFile(t, "f1")
-	f2 := tempFile(t, "f2")
-
-	var b bytes.Buffer
-	err := run(os.Stdin, &b, false, 10, time.Second, []string{
-		f1.Name(), f2.Name(),
-	})
-	if err != nil {
-		t.Error(err)
-	}
-
-	ex := fmt.Sprintf("==> %s <==\nf1\n==> %s <==\nf2", f1.Name(), f2.Name())
-	if ex != b.String() {
-		t.Errorf("%v != %v", ex, b.String())
-	}
-}
-
-type syncWriter struct {
-	ch chan []byte
-}
-
-func (sw *syncWriter) Write(b []byte) (int, error) {
-	// ignore writes with len zero
-	if len(b) == 0 {
-		return 0, nil
-	}
-	sw.ch <- b
-	return len(b), nil
-}
-
-func TestTailFollow(t *testing.T) {
-	dir := t.TempDir()
-	f, err := os.CreateTemp(dir, "follow")
-	if err != nil {
-		t.Fatalf("can't create temp file: %v", err)
-	}
-	defer f.Close()
-
-	sw := &syncWriter{
-		ch: make(chan []byte),
-	}
-
-	go func() {
-		_ = run(f, sw, true, 10, 100*time.Millisecond, nil)
-	}()
-	ff, err := os.OpenFile(f.Name(), os.O_RDWR, 0o644)
-	if err != nil {
-		t.Fatalf("can't open temp file: %v", err)
-	}
-	defer ff.Close()
-
-	// wait a bit before writing to file
-	time.Sleep(300 * time.Millisecond)
-
-	firstLine := []byte("hello\n")
-
-	_, err = ff.Write(firstLine)
-	if err != nil {
-		t.Fatalf("can't write to file: %v", err)
-	}
-
-	ff.Sync()
-
-	r1 := <-sw.ch
-	if !bytes.Equal(r1, firstLine) {
-		t.Fatalf("expected %q, got %q", string(firstLine), string(r1))
-	}
-}
-
-func TestLastNLines(t *testing.T) {
 	tests := []struct {
-		input  []byte
-		output []byte
-		n      int
+		name     string
+		args     []string
+		stdin    string
+		want     string
+		wantCode int
 	}{
-		{
-			input:  []byte{'a', '\n', '\n', 'b', '\n'},
-			output: []byte{'a', '\n', '\n', 'b', '\n'},
-			n:      4,
-		},
-		{
-			input:  []byte{'a', '\n', '\n', 'b', '\n'},
-			output: []byte{'a', '\n', '\n', 'b', '\n'},
-			n:      3,
-		},
-		{
-			input:  []byte{'a', '\n', '\n', 'b', '\n'},
-			output: []byte{'\n', 'b', '\n'},
-			n:      2,
-		},
-		{
-			input:  []byte{'a', '\n', '\n', 'b', '\n'},
-			output: []byte{'b', '\n'},
-			n:      1,
-		},
-		{
-			input:  []byte{'a', '\n', 'b', '\n', 'c', '\n'},
-			output: []byte{'c', '\n'},
-			n:      1,
-		},
-		{
-			input:  []byte{'a', '\n', 'b', '\n', 'c'},
-			output: []byte{'c'},
-			n:      1,
-		},
-		{
-			input:  []byte{'\n'},
-			output: []byte{'\n'},
-			n:      1,
-		},
+		{name: "default lines", args: []string{"lines.txt"}, want: "three\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve"},
+		{name: "requested lines", args: []string{"-n", "2", "lines.txt"}, want: "eleven\ntwelve"},
+		{name: "one line", args: []string{"-n", "1", "lines.txt"}, want: "twelve"},
+		{name: "zero lines", args: []string{"-n", "0", "lines.txt"}, want: ""},
+		{name: "requested bytes", args: []string{"-c", "5", "lines.txt"}, want: "welve"},
+		{name: "zero bytes", args: []string{"-c", "0", "lines.txt"}, want: ""},
+		{name: "stdin lines", args: []string{"-n", "2"}, stdin: "alpha\nbeta\ngamma\n", want: "beta\ngamma\n"},
+		{name: "stdin bytes", args: []string{"-c", "5"}, stdin: "alpha\nbeta\n", want: "beta\n"},
+		{name: "stdin file operand", args: []string{"-n", "1", "-"}, stdin: "alpha\nbeta\n", want: "beta\n"},
+		{name: "multiple files", args: []string{"-n", "1", "lines.txt", "other.txt"}, want: "==> lines.txt <==\ntwelve\n==> other.txt <==\nother\n"},
+		{name: "cannot combine counts", args: []string{"-c", "1", "-n", "1"}, wantCode: 2},
+		{name: "missing file", args: []string{"missing.txt"}, wantCode: 1},
 	}
 
-	for _, test := range tests {
-		r := lastNLines(test.input, test.n)
-		if !bytes.Equal(r, test.output) {
-			t.Errorf("want: %q, got: %q", string(test.output), string(r))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			ioEnv := core.IO{
+				Stdin:  strings.NewReader(tt.stdin),
+				Stdout: &stdout,
+				Stderr: &stderr,
+				Dir:    dir,
+			}
+			if code := Main(context.Background(), ioEnv, tt.args...); code != tt.wantCode {
+				t.Fatalf("Main() exit code = %d, want %d; stderr: %q", code, tt.wantCode, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Errorf("stdout = %q, want %q", stdout.String(), tt.want)
+			}
+			if tt.name == "missing file" && !strings.Contains(stderr.String(), "missing.txt") {
+				t.Errorf("stderr = %q, want missing filename", stderr.String())
+			}
+		})
+	}
+}
+
+func TestTailLargeCounts(t *testing.T) {
+	input := strings.Repeat("x", 40*1024) + "last"
+	var byteOutput bytes.Buffer
+	if err := tailBytes(context.Background(), strings.NewReader(input), &byteOutput, 8); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := byteOutput.String(), "xxxxlast"; got != want {
+		t.Fatalf("tailBytes() = %q, want %q", got, want)
+	}
+
+	lines := strings.Builder{}
+	for i := 0; i < 1100; i++ {
+		fmt.Fprintf(&lines, "%d\n", i)
+	}
+	var lineOutput bytes.Buffer
+	if err := tailLines(context.Background(), strings.NewReader(lines.String()), &lineOutput, 3); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := lineOutput.String(), "1097\n1098\n1099\n"; got != want {
+		t.Fatalf("tailLines() = %q, want %q", got, want)
+	}
+}
+
+func TestMainFollowAndCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "follow.txt")
+	if err := os.WriteFile(path, []byte("first\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	output := make(chan string, 4)
+	writer := writerFunc(func(p []byte) (int, error) {
+		output <- string(bytes.Clone(p))
+		return len(p), nil
+	})
+	var stderr bytes.Buffer
+	ioEnv := core.IO{Stdout: writer, Stderr: &stderr}
+	done := make(chan int, 1)
+	go func() {
+		done <- Main(ctx, ioEnv, "-f", "-n", "1", path)
+	}()
+
+	select {
+	case got := <-output:
+		if got != "second\n" {
+			t.Fatalf("initial output = %q, want %q", got, "second\n")
 		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail did not emit initial output")
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("third\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-output:
+		if got != "third\n" {
+			t.Fatalf("follow output = %q, want %q", got, "third\n")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail did not emit appended data")
+	}
+
+	cancel()
+	select {
+	case code := <-done:
+		if code != 130 {
+			t.Fatalf("Main() exit code = %d, want 130; stderr: %q", code, stderr.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("tail did not stop after context cancellation")
+	}
+}
+
+func TestMainBrokenPipe(t *testing.T) {
+	ioEnv := core.IO{
+		Stdin:  strings.NewReader("a\nb\n"),
+		Stdout: writerFunc(func([]byte) (int, error) { return 0, io.ErrClosedPipe }),
+		Stderr: io.Discard,
+	}
+	if code := Main(context.Background(), ioEnv, "-n", "1"); code != 0 {
+		t.Fatalf("Main() exit code = %d, want 0 for closed downstream pipe", code)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) {
+	return f(p)
+}
+
+type failingReader struct {
+	err error
+}
+
+func (r failingReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestMainReadError(t *testing.T) {
+	errRead := errors.New("read failed")
+	var stderr bytes.Buffer
+	ioEnv := core.IO{Stdin: failingReader{errRead}, Stdout: io.Discard, Stderr: &stderr}
+	if code := Main(context.Background(), ioEnv, "-n", "1"); code != 1 {
+		t.Fatalf("Main() exit code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), errRead.Error()) {
+		t.Errorf("stderr = %q, want read error", stderr.String())
+	}
+}
+
+func TestMainCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{Stdin: strings.NewReader("one\ntwo\n"), Stdout: &stdout, Stderr: &stderr}
+	if code := Main(ctx, ioEnv, "-n", "1"); code != 130 {
+		t.Fatalf("Main() exit code = %d, want 130", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty", stdout.String())
 	}
 }

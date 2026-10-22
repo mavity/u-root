@@ -53,8 +53,7 @@ func isBrokenPipe(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "pipe is being closed") ||
-		strings.Contains(msg, "i/o error")
+		strings.Contains(msg, "pipe is being closed")
 }
 
 type params struct {
@@ -105,7 +104,9 @@ func (c *cmd) grepStream(in *grepInput, re *regexp.Regexp) (stopQuiet bool, err 
 			if c.params.quiet {
 				return true, nil
 			}
-			c.printMatch(in, line, lineNum+1, m)
+			if err := c.printMatch(in, line, lineNum+1, m); err != nil {
+				return false, err
+			}
 			if c.params.noShowMatch {
 				break
 			}
@@ -118,32 +119,45 @@ func (c *cmd) grepStream(in *grepInput, re *regexp.Regexp) (stopQuiet bool, err 
 	return false, c.stdout.Flush()
 }
 
-func (c *cmd) printMatch(in *grepInput, line string, lineNum int, match bool) {
+func (c *cmd) printMatch(in *grepInput, line string, lineNum int, match bool) (err error) {
 	if match == !c.params.invert {
 		c.matchCount++
 	}
 	if c.params.count {
-		return
+		return nil
 	}
 	defer func() {
-		_ = c.stdout.WriteByte('\n')
+		if werr := c.stdout.WriteByte('\n'); werr != nil && err == nil {
+			err = werr
+		}
 	}()
 	if c.showName {
-		_, _ = c.stdout.WriteString(in.name)
+		if _, err := c.stdout.WriteString(in.name); err != nil {
+			return err
+		}
 	}
 	if c.params.noShowMatch {
-		return
+		return nil
 	}
 	if match == !c.params.invert {
 		if c.showName {
-			_ = c.stdout.WriteByte(':')
+			if err := c.stdout.WriteByte(':'); err != nil {
+				return err
+			}
 		}
 		if c.params.number {
-			_, _ = c.stdout.Write(strconv.AppendUint(nil, uint64(lineNum), 10))
-			_ = c.stdout.WriteByte(':')
+			if _, err := c.stdout.Write(strconv.AppendUint(nil, uint64(lineNum), 10)); err != nil {
+				return err
+			}
+			if err := c.stdout.WriteByte(':'); err != nil {
+				return err
+			}
 		}
-		_, _ = c.stdout.WriteString(line)
+		if _, err := c.stdout.WriteString(line); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (c *cmd) execute() error {

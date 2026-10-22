@@ -42,8 +42,7 @@ func isBrokenPipe(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "pipe is being closed") ||
-		strings.Contains(msg, "i/o error")
+		strings.Contains(msg, "pipe is being closed")
 }
 
 func catStream(ctx context.Context, r io.Reader, w io.Writer) error {
