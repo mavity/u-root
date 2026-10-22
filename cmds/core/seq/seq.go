@@ -201,12 +201,18 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	fs.BoolVar(&widthEqual, "w", false, "equalize width by padding with leading zeroes")
 
 	flagArgs := args
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "-") {
-			if _, err := strconv.ParseFloat(arg, 64); err == nil {
-				flagArgs = append(append(append([]string(nil), args[:i]...), "--"), args[i:]...)
-				break
-			}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" || arg == "-" || !strings.HasPrefix(arg, "-") {
+			break
+		}
+		if arg == "-f" || arg == "-s" {
+			i++
+			continue
+		}
+		if _, err := strconv.ParseFloat(arg, 64); err == nil {
+			flagArgs = append(append(append([]string(nil), args[:i]...), "--"), args[i:]...)
+			break
 		}
 	}
 	if err := fs.Parse(unixflag.ArgsToGoArgs(flagArgs)); err != nil {

@@ -214,6 +214,21 @@ func TestMainFlagsAndWriterErrors(t *testing.T) {
 			args: []string{"-w", "-3", "2"},
 			want: "-3\n-2\n-1\n00\n01\n02\n",
 		},
+		{
+			name: "negative increment after positive start",
+			args: []string{"3", "-1", "-1"},
+			want: "3\n2\n1\n0\n-1\n",
+		},
+		{
+			name: "negative increment to positive end",
+			args: []string{"3", "-1", "1"},
+			want: "3\n2\n1\n",
+		},
+		{
+			name: "negative increment after separator flag",
+			args: []string{"-s", ",", "1", "-1", "-3"},
+			want: "1,0,-1,-2,-3\n",
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
@@ -239,10 +254,40 @@ func TestMainFlagsAndWriterErrors(t *testing.T) {
 	}
 }
 
+func TestMainContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stdout := &seqCancelWriter{cancel: cancel}
+	code := Main(ctx, core.IO{
+		Stdout: stdout,
+		Stderr: io.Discard,
+	}, "1", "3")
+	if code != 130 {
+		t.Fatalf("seq exit code = %d, want 130", code)
+	}
+	if got, want := stdout.String(), "1"; got != want {
+		t.Errorf("seq output before cancellation = %q, want %q", got, want)
+	}
+}
+
 type seqErrorWriter struct {
 	err error
 }
 
 func (w seqErrorWriter) Write([]byte) (int, error) {
 	return 0, w.err
+}
+
+type seqCancelWriter struct {
+	buf    bytes.Buffer
+	cancel context.CancelFunc
+}
+
+func (w *seqCancelWriter) Write(p []byte) (int, error) {
+	n, err := w.buf.Write(p)
+	w.cancel()
+	return n, err
+}
+
+func (w *seqCancelWriter) String() string {
+	return w.buf.String()
 }
