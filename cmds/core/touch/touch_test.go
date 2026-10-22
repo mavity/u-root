@@ -22,7 +22,7 @@ func TestParseParamsDate(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	p, err := parseParams(date, false, false, false)
+	p, err := parseParams(date, "", "", false, false, false)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -32,7 +32,7 @@ func TestParseParamsDate(t *testing.T) {
 	}
 
 	date = "invalid"
-	_, err = parseParams(date, false, false, false)
+	_, err = parseParams(date, "", "", false, false, false)
 	if err == nil {
 		t.Errorf("expected error, got nil")
 	}
@@ -78,7 +78,7 @@ func TestParseParams(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		p, err := parseParams("", test.access, test.modification, test.create)
+		p, err := parseParams("", "", "", test.access, test.modification, test.create)
 		if err != nil {
 			t.Fatalf("expected no error, got %v", err)
 		}
@@ -92,6 +92,129 @@ func TestParseParams(t *testing.T) {
 		if p.create != test.expected.create {
 			t.Errorf("expected %v, got %v", test.expected.create, p.create)
 		}
+	}
+}
+
+func TestParseTimestamp(t *testing.T) {
+	now := time.Date(2025, time.June, 15, 12, 0, 0, 0, time.Local)
+	for _, tt := range []struct {
+		stamp string
+		want  time.Time
+	}{
+		{"01011234", time.Date(2025, time.January, 1, 12, 34, 0, 0, time.Local)},
+		{"6801010000", time.Date(2068, time.January, 1, 0, 0, 0, 0, time.Local)},
+		{"6901010000", time.Date(1969, time.January, 1, 0, 0, 0, 0, time.Local)},
+		{"202001020304.05", time.Date(2020, time.January, 2, 3, 4, 5, 0, time.Local)},
+	} {
+		got, err := parseTimestamp(tt.stamp, now)
+		if err != nil {
+			t.Errorf("parseTimestamp(%q) error = %v", tt.stamp, err)
+			continue
+		}
+		if !got.Equal(tt.want) {
+			t.Errorf("parseTimestamp(%q) = %v, want %v", tt.stamp, got, tt.want)
+		}
+	}
+
+	for _, stamp := range []string{"", "202013010000", "202002300000", "202001010000.60", "202001010000.0"} {
+		if _, err := parseTimestamp(stamp, now); err == nil {
+			t.Errorf("parseTimestamp(%q) succeeded, want error", stamp)
+		}
+	}
+}
+
+func TestTouchTimestampAndReference(t *testing.T) {
+	dir := t.TempDir()
+	ioEnv := core.IO{Dir: dir, Stdout: io.Discard, Stderr: io.Discard}
+
+	if code := Main(context.Background(), ioEnv, "-t", "200101020304.05", "timestamp"); code != 0 {
+		t.Fatalf("touch -t exit code = %d", code)
+	}
+	timestamp, err := parseTimestamp("200101020304.05", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(dir, "timestamp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ModTime().Unix() != timestamp.Unix() {
+		t.Errorf("touch -t mtime = %v, want %v", info.ModTime(), timestamp)
+	}
+
+	reference := filepath.Join(dir, "reference")
+	if err := os.WriteFile(reference, []byte("reference"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	referenceAccess := time.Date(2001, time.February, 3, 4, 5, 6, 0, time.Local)
+	referenceModify := time.Date(2002, time.March, 4, 5, 6, 7, 0, time.Local)
+	if err := os.Chtimes(reference, referenceAccess, referenceModify); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(context.Background(), ioEnv, "-r", "reference", "copied-times"); code != 0 {
+		t.Fatalf("touch -r exit code = %d", code)
+	}
+	copied, err := os.Stat(filepath.Join(dir, "copied-times"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	copiedAccess, err := referenceAccessTime(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copiedAccess.Unix() != referenceAccess.Unix() {
+		t.Errorf("touch -r atime = %v, want %v", copiedAccess, referenceAccess)
+	}
+	if copied.ModTime().Unix() != referenceModify.Unix() {
+		t.Errorf("touch -r mtime = %v, want %v", copied.ModTime(), referenceModify)
+	}
+
+	partial := filepath.Join(dir, "partial")
+	if err := os.WriteFile(partial, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initialAccess := time.Date(2003, time.April, 5, 6, 7, 8, 0, time.Local)
+	initialModify := time.Date(2004, time.May, 6, 7, 8, 9, 0, time.Local)
+	if err := os.Chtimes(partial, initialAccess, initialModify); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(context.Background(), ioEnv, "-a", "-r", "reference", "partial"); code != 0 {
+		t.Fatalf("touch -a -r exit code = %d", code)
+	}
+	partialInfo, err := os.Stat(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialAccess, err := referenceAccessTime(partialInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partialAccess.Unix() != referenceAccess.Unix() {
+		t.Errorf("touch -a -r atime = %v, want %v", partialAccess, referenceAccess)
+	}
+	if partialInfo.ModTime().Unix() != initialModify.Unix() {
+		t.Errorf("touch -a -r changed mtime to %v, want %v", partialInfo.ModTime(), initialModify)
+	}
+
+	if err := os.Chtimes(partial, initialAccess, initialModify); err != nil {
+		t.Fatal(err)
+	}
+	if code := Main(context.Background(), ioEnv, "-m", "-r", "reference", "partial"); code != 0 {
+		t.Fatalf("touch -m -r exit code = %d", code)
+	}
+	partialInfo, err = os.Stat(partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialAccess, err = referenceAccessTime(partialInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partialAccess.Unix() != initialAccess.Unix() {
+		t.Errorf("touch -m -r changed atime to %v, want %v", partialAccess, initialAccess)
+	}
+	if partialInfo.ModTime().Unix() != referenceModify.Unix() {
+		t.Errorf("touch -m -r mtime = %v, want %v", partialInfo.ModTime(), referenceModify)
 	}
 }
 

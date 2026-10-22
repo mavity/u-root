@@ -49,7 +49,7 @@ func TestMkTemp(t *testing.T) {
 		},
 		{
 			cmdline: []string{"-u"},
-			out:     "",
+			out:     tmpDir,
 			err:     nil,
 		},
 		{
@@ -60,6 +60,7 @@ func TestMkTemp(t *testing.T) {
 		{
 			cmdline: []string{"-q", "-p", "/notexists"},
 			out:     "",
+			err:     os.ErrNotExist,
 		},
 	}
 
@@ -76,6 +77,67 @@ func TestMkTemp(t *testing.T) {
 		if !strings.HasPrefix(r, tt.out) {
 			t.Errorf("stdout got:\n%s\nwant starting with:\n%s", r, tt.out)
 		}
+	}
+}
+
+func TestDryRunPrintsUncreatedName(t *testing.T) {
+	dir := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+
+	if err := run(context.Background(), ioEnv, "-u", "-p", dir, "candidate"); err != nil {
+		t.Fatalf("run(-u) error = %v", err)
+	}
+
+	name := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(name, filepath.Join(dir, "candidate")) {
+		t.Fatalf("dry-run name = %q, want prefix %q", name, filepath.Join(dir, "candidate"))
+	}
+	if _, err := os.Stat(name); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("dry-run created %q: stat error = %v", name, err)
+	}
+	if !strings.Contains(stderr.String(), "unsafe") {
+		t.Errorf("dry-run warning = %q, want unsafe warning", stderr.String())
+	}
+}
+
+func TestTmpdirTemplate(t *testing.T) {
+	dir := t.TempDir()
+	var stdout bytes.Buffer
+	ioEnv := core.IO{
+		Stdout: &stdout,
+		Stderr: io.Discard,
+		LookupEnv: func(key string) (string, bool) {
+			return dir, key == "TMPDIR"
+		},
+	}
+
+	if err := run(context.Background(), ioEnv, "-t", "sample"); err != nil {
+		t.Fatalf("run(-t) error = %v", err)
+	}
+
+	name := strings.TrimSpace(stdout.String())
+	if !strings.HasPrefix(name, filepath.Join(dir, "sample")) {
+		t.Fatalf("name = %q, want prefix %q", name, filepath.Join(dir, "sample"))
+	}
+	if _, err := os.Stat(name); err != nil {
+		t.Errorf("mktemp -t did not create %q: %v", name, err)
+	}
+}
+
+func TestQuietFailureSuppressesDiagnostic(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "missing")
+	var stdout, stderr bytes.Buffer
+	ioEnv := core.IO{Stdout: &stdout, Stderr: &stderr}
+
+	if code := Main(context.Background(), ioEnv, "-q", "-p", dir); code != 1 {
+		t.Fatalf("Main(-q) exit code = %d, want 1", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want empty output", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want suppressed diagnostic", stderr.String())
 	}
 }
 
@@ -101,5 +163,8 @@ func TestDefaultFlags(t *testing.T) {
 	}
 	if f.dir != "" {
 		t.Error("tmpdir should be empty string by default")
+	}
+	if f.t {
+		t.Error("tmpdir template mode should be false by default")
 	}
 }

@@ -22,8 +22,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"math/rand"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -34,9 +36,22 @@ type flags struct {
 	d      bool
 	u      bool
 	q      bool
+	t      bool
 	prefix string
 	suffix string
 	dir    string
+}
+
+type quietError struct {
+	err error
+}
+
+func (e quietError) Error() string {
+	return e.err.Error()
+}
+
+func (e quietError) Unwrap() error {
+	return e.err
 }
 
 func (f *flags) register(fs *flag.FlagSet) {
@@ -48,6 +63,8 @@ func (f *flags) register(fs *flag.FlagSet) {
 
 	fs.BoolVar(&f.q, "quiet", false, "Quiet: show no errors")
 	fs.BoolVar(&f.q, "q", false, "Quiet: show no errors (shorthand)")
+
+	fs.BoolVar(&f.t, "t", false, "Generate a template relative to TMPDIR")
 
 	fs.StringVar(&f.prefix, "prefix", "", "add a prefix")
 	fs.StringVar(&f.prefix, "s", "", "add a prefix (shorthand, 's' is for compatibility with GNU mktemp)")
@@ -72,9 +89,13 @@ func mktemp(ioEnv core.IO, f flags) (string, error) {
 
 	if f.u {
 		if !f.q {
-			log.Printf("Not doing anything but dry-run is an inherently unsafe concept")
+			fmt.Fprintf(ioEnv.Stderr, "mktemp: warning: dry-run is inherently unsafe\n")
 		}
-		return "", nil
+		prefix := f.prefix
+		if prefix == "" {
+			prefix = "tmp"
+		}
+		return filepath.Join(dir, prefix+strconv.FormatUint(rand.Uint64(), 10)), nil
 	}
 
 	if f.d {
@@ -103,6 +124,13 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		return err
 	}
 
+	if f.t && f.dir == "" {
+		f.dir = ioEnv.Getenv("TMPDIR")
+		if f.dir == "" {
+			f.dir = os.TempDir()
+		}
+	}
+
 	switch fs.NArg() {
 	case 1:
 		f.prefix = f.prefix + strings.Split(fs.Args()[0], "X")[0] + f.suffix
@@ -115,7 +143,7 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	fileName, err := mktemp(ioEnv, f)
 	if err != nil {
 		if f.q {
-			return nil
+			return quietError{err: err}
 		}
 		return err
 	}
@@ -134,7 +162,8 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	if err := run(ctx, ioEnv, args...); err != nil {
-		if !errors.Is(err, flag.ErrHelp) {
+		var quietErr quietError
+		if !errors.Is(err, flag.ErrHelp) && !errors.As(err, &quietErr) {
 			fmt.Fprintf(ioEnv.Stderr, "mktemp: %v\n", err)
 		}
 		return 1

@@ -113,7 +113,9 @@ func mkdir(ctx context.Context, ioEnv core.IO, args ...string) error {
 			fmt.Fprintf(ioEnv.Stdout, "%v\n", name)
 		}
 		if f.mode != "" {
-			_ = os.Chmod(resolvedName, createMode)
+			if err := os.Chmod(resolvedName, createMode); err != nil {
+				errs = errors.Join(errs, err)
+			}
 		}
 	}
 	return errs

@@ -4,13 +4,16 @@
 
 //go:build linux
 
-package main
+package touch
 
 import (
+	"context"
+	"io"
 	"os"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/u-root/u-root/pkg/core"
 )
 
 func TestAccess(t *testing.T) {
@@ -25,14 +28,8 @@ func TestAccess(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	cmd, err := command("-a", "-d", "2023-01-01T00:00:00Z", f.Name())
-	if err != nil {
-		t.Fatalf("command: got %v, want nil", err)
-	}
-
-	err = cmd.run()
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	if code := Main(context.Background(), core.IO{Stderr: io.Discard}, "-a", "-d", "2023-01-01T00:00:00Z", f.Name()); code != 0 {
+		t.Fatalf("touch exit code = %d, want 0", code)
 	}
 
 	mfi, err := f.Stat()
@@ -40,9 +37,11 @@ func TestAccess(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	expected := accessDate.UnixNano()
-	at := mfi.Sys().(*syscall.Stat_t).Atim.Nano()
-	if at != expected {
-		t.Errorf("expected access time %v, got %v", expected, at)
+	at, err := referenceAccessTime(mfi)
+	if err != nil {
+		t.Fatalf("reading access time: %v", err)
+	}
+	if at.UnixNano() != accessDate.UnixNano() {
+		t.Errorf("expected access time %v, got %v", accessDate, at)
 	}
 }
