@@ -78,6 +78,10 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 			if st, err = os.Stat(resolved); err != nil {
 				return fmt.Errorf("could not stat newly created file: %w", err)
 			}
+		} else if os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("could not stat %q: %w", resolved, err)
 		}
 		var final int64
 		if rfile != "" {
@@ -101,8 +105,9 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 			}
 		}
 
-		// intentionally ignore, like GNU truncate
-		_ = os.Truncate(resolved, final)
+		if err := os.Truncate(resolved, final); err != nil {
+			return fmt.Errorf("could not truncate %q: %w", resolved, err)
+		}
 	}
 	return nil
 }

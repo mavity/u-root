@@ -133,7 +133,29 @@ func TestTruncate(t *testing.T) {
 						t.Errorf("the file was not truncated right, got file size %v, want: %v", st.Size(), tt.sizeWant)
 					}
 				}
+
 			}
 		})
+	}
+}
+
+func TestTruncateReportsErrorsAndHonorsNoCreate(t *testing.T) {
+	tmpdir := t.TempDir()
+	ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+
+	dir := filepath.Join(tmpdir, "directory")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), ioEnv, "-s", "1", dir); err == nil {
+		t.Fatal("run() succeeded when asked to truncate a directory")
+	}
+
+	missing := filepath.Join(tmpdir, "missing")
+	if err := run(context.Background(), ioEnv, "-c", "-s", "1", missing); err != nil {
+		t.Fatalf("run() with -c on a missing file returned error: %v", err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("run() with -c created the missing file, stat error = %v", err)
 	}
 }
