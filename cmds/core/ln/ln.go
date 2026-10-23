@@ -40,15 +40,16 @@ import (
 )
 
 type config struct {
-	symlink  bool
-	verbose  bool
-	force    bool
-	nondir   bool
-	prompt   bool
-	logical  bool
-	physical bool
-	relative bool
-	dirtgt   string
+	symlink    bool
+	verbose    bool
+	force      bool
+	nondir     bool
+	prompt     bool
+	logical    bool
+	physical   bool
+	relative   bool
+	dirtgt     string
+	targetKind string
 }
 
 // promptOverwrite ask for overwrite destination
@@ -105,16 +106,13 @@ func inferLinkName(target, linkName string) string {
 }
 
 // dereferTarget treat symlinks according the flags -P and -L
-func (conf config) dereferTarget(ioEnv core.IO, target string, linkFunc *func(string, string) error) (string, error) {
-	if conf.logical || conf.physical {
+func (conf config) dereferTarget(ioEnv core.IO, target string) (string, error) {
+	if conf.logical && !conf.symlink {
 		resolved := ioEnv.ResolvePath(target)
 		if newTarget, err := filepath.EvalSymlinks(resolved); err != nil {
 			return "", err
 		} else if newTarget != resolved {
 			target = newTarget
-			if conf.physical {
-				*linkFunc = os.Symlink
-			}
 		}
 	}
 	return target, nil
@@ -130,14 +128,29 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	fs.BoolVar(&conf.verbose, "v", false, "print name of each linked file")
 	fs.BoolVar(&conf.force, "f", false, "remove destination files")
 	fs.BoolVar(&conf.nondir, "T", false, "treat linkname operand as a non-dir always")
+	fs.BoolVar(&conf.nondir, "n", false, "do not dereference destination symlink to a directory")
 	fs.BoolVar(&conf.prompt, "i", false, "prompt if the user wants overwrite")
 	fs.BoolVar(&conf.logical, "L", false, "dereference targets if are symbolic links")
 	fs.BoolVar(&conf.physical, "P", false, "make hard links directly to symbolic links")
 	fs.BoolVar(&conf.relative, "r", false, "create symlinks relative to link location")
 	fs.StringVar(&conf.dirtgt, "t", "", "specify the directory to put the links")
+	fs.StringVar(&conf.targetKind, "target-kind", "", "symbolic-link target kind: file or directory")
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
+	}
+	targetKind := uint32(0)
+	switch conf.targetKind {
+	case "":
+	case "file":
+		targetKind = 1
+	case "directory":
+		targetKind = 2
+	default:
+		return fmt.Errorf("ln: invalid target kind %q (want file or directory)", conf.targetKind)
+	}
+	if targetKind != 0 && !conf.symlink {
+		return fmt.Errorf("ln: --target-kind requires -s")
 	}
 
 	rest := fs.Args()
@@ -159,10 +172,8 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		default:
 		}
 
-		curLinkFunc := linkFunc
-
 		// dereference symlinks
-		t, err := conf.dereferTarget(ioEnv, target, &curLinkFunc)
+		t, err := conf.dereferTarget(ioEnv, target)
 		if err != nil {
 			return err
 		}
@@ -207,7 +218,12 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 			resolvedTarget = relTarget
 		}
 
-		if err := curLinkFunc(resolvedTarget, resolvedLink); err != nil {
+		if conf.symlink {
+			err = createSymlink(resolvedTarget, resolvedLink, targetKind)
+		} else {
+			err = linkFunc(resolvedTarget, resolvedLink)
+		}
+		if err != nil {
 			return err
 		}
 

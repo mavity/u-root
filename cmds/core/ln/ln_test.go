@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -51,6 +52,13 @@ func loadTests() []test {
 			[]result{{symlink: true, name: "b", linksTo: "a"}},
 			[]create{{name: "a"}},
 			"ln -s a b",
+		},
+		{
+			config{symlink: true, targetKind: "directory"},
+			[]string{"folder", "folder-link"},
+			[]result{{symlink: true, name: "folder-link", linksTo: "folder"}},
+			[]create{{name: "folder", dir: true}},
+			"ln -s --target-kind directory folder folder-link",
 		},
 		{
 			config{symlink: true},
@@ -212,6 +220,9 @@ func TestLn(t *testing.T) {
 		if testCase.conf.relative {
 			cmdArgs = append(cmdArgs, "-r")
 		}
+		if testCase.conf.targetKind != "" {
+			cmdArgs = append(cmdArgs, "--target-kind", testCase.conf.targetKind)
+		}
 		if testCase.conf.dirtgt != "" {
 			cmdArgs = append(cmdArgs, "-t", testCase.conf.dirtgt)
 		}
@@ -236,5 +247,105 @@ func TestLn(t *testing.T) {
 				testHardLink(d, expected.name, expected.linksTo, t)
 			}
 		}
+	}
+}
+
+func TestLnDanglingDirectorySymlinkTargetKind(t *testing.T) {
+	dir := t.TempDir()
+	ioEnv := core.IO{Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard, Dir: dir}
+	err := run(context.Background(), ioEnv, "-s", "--target-kind", "directory", "missing-directory", "link")
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("host policy does not permit creating a dangling directory symlink: %v", err)
+		}
+		t.Fatal(err)
+	}
+	target, err := os.Readlink(filepath.Join(dir, "link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target != "missing-directory" {
+		t.Fatalf("stored link target = %q, want %q", target, "missing-directory")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "link")); !os.IsNotExist(err) {
+		t.Fatalf("dangling directory link stat error = %v, want not-exist", err)
+	}
+}
+
+func TestLnNoDereferenceDestinationDirectorySymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	actualDir := filepath.Join(dir, "actual-dir")
+	linkToDir := filepath.Join(dir, "dir-link")
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(actualDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(actualDir, linkToDir); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("host policy does not permit creating a directory symlink: %v", err)
+		}
+		t.Fatal(err)
+	}
+
+	ioEnv := core.IO{Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard, Dir: dir}
+	if err := run(context.Background(), ioEnv, "-n", "-s", "-f", "target", "dir-link"); err != nil {
+		t.Fatal(err)
+	}
+	storedTarget, err := os.Readlink(linkToDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedTarget != "target" {
+		t.Fatalf("destination symlink target = %q, want %q", storedTarget, "target")
+	}
+	if _, err := os.Lstat(filepath.Join(actualDir, "target")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected link was created inside destination directory: %v", err)
+	}
+}
+
+func TestLnHardLinkSourceFollowModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this host does not expose a portable hard link to a symlink object")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "target"), []byte("target"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("target", filepath.Join(dir, "source-link")); err != nil {
+		t.Fatal(err)
+	}
+	ioEnv := core.IO{Stdin: strings.NewReader(""), Stdout: io.Discard, Stderr: io.Discard, Dir: dir}
+
+	if err := run(context.Background(), ioEnv, "-P", "source-link", "physical-link"); err != nil {
+		t.Fatal(err)
+	}
+	sourceLinkInfo, err := os.Lstat(filepath.Join(dir, "source-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	physicalInfo, err := os.Lstat(filepath.Join(dir, "physical-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(sourceLinkInfo, physicalInfo) {
+		t.Fatal("-P did not create a hard link to the source symlink itself")
+	}
+
+	if err := run(context.Background(), ioEnv, "-L", "source-link", "logical-link"); err != nil {
+		t.Fatal(err)
+	}
+	targetInfo, err := os.Stat(filepath.Join(dir, "target"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logicalInfo, err := os.Stat(filepath.Join(dir, "logical-link"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(targetInfo, logicalInfo) {
+		t.Fatal("-L did not create a hard link to the source symlink's referent")
 	}
 }
