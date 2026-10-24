@@ -1,321 +1,238 @@
-// Copyright 2016-2017 the u-root Authors. All rights reserved
+// Copyright 2016-2020 the u-root Authors. All rights reserved
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package chmod
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/u-root/u-root/pkg/core"
 )
 
-func TestChmod(t *testing.T) {
-	tmpdir := t.TempDir()
-	filePath := filepath.Join(tmpdir, "tmpfile")
-	if err := os.WriteFile(filePath, []byte("data"), 0o666); err != nil {
-		t.Fatalf("Failed to create tmp file: %v", err)
-	}
-
+func TestApplyModeExpressions(t *testing.T) {
 	for _, tt := range []struct {
-		name       string
-		args       []string
-		recursive  bool
-		reference  string
-		modeBefore os.FileMode
-		modeAfter  os.FileMode
-		err        error
+		name     string
+		mode     string
+		current  uint16
+		umask    uint16
+		isDir    bool
+		want     uint16
+		conflict bool
 	}{
-		{
-			name: "len(args) < 1",
-			err:  errBadUsage,
-		},
-		{
-			name: "len(args) < 2 && *reference",
-			args: []string{"arg"},
-			err:  errBadUsage,
-		},
-		{
-			name: "file does not exist",
-			args: []string{"g-rx", "filedoesnotexist"},
-			err:  os.ErrNotExist,
-		},
-		{
-			name: "Value should be less than or equal to 0777",
-			args: []string{"7777", filePath},
-			err:  strconv.ErrRange,
-		},
-		{
-			name:       "mode 0777 correct",
-			args:       []string{"0777", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o777,
-		},
-		{
-			name:       "mode 0644 correct",
-			args:       []string{"0644", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o644,
-		},
-		{
-			name: "unable to decode mode",
-			args: []string{"a=9rwx", filePath},
-			err:  strconv.ErrSyntax,
-		},
-		{
-			name:       "mode u-rwx correct",
-			args:       []string{"u-rwx", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o077,
-		},
-		{
-			name:       "mode g-rx correct",
-			args:       []string{"g-rx", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o727,
-		},
-		{
-			name:       "mode a-xr correct",
-			args:       []string{"a-xr", filePath},
-			modeBefore: 0o222,
-			modeAfter:  0o222,
-		},
-		{
-			name:       "mode a-xw correct",
-			args:       []string{"a-xw", filePath},
-			modeBefore: 0o666,
-			modeAfter:  0o444,
-		},
-		{
-			name:       "mode u-xw correct",
-			args:       []string{"u-xw", filePath},
-			modeBefore: 0o666,
-			modeAfter:  0o466,
-		},
-		{
-			name:       "mode a= correct",
-			args:       []string{"a=", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o000,
-		},
-		{
-			name:       "mode u= correct",
-			args:       []string{"u=", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o077,
-		},
-		{
-			name:       "mode u- correct",
-			args:       []string{"u-", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o777,
-		},
-		{
-			name:       "mode o+ correct",
-			args:       []string{"o+", filePath},
-			modeBefore: 0o700,
-			modeAfter:  0o700,
-		},
-		{
-			name:       "mode g=rx correct",
-			args:       []string{"g=rx", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o757,
-		},
-		{
-			name:       "mode u=rx correct",
-			args:       []string{"u=rx", filePath},
-			modeBefore: 0o077,
-			modeAfter:  0o577,
-		},
-		{
-			name:       "mode o=rx correct",
-			args:       []string{"o=rx", filePath},
-			modeBefore: 0o077,
-			modeAfter:  0o075,
-		},
-		{
-			name:       "mode u=xw correct",
-			args:       []string{"u=xw", filePath},
-			modeBefore: 0o742,
-			modeAfter:  0o342,
-		},
-		{
-			name:       "mode a-rwx correct",
-			args:       []string{"a-rwx", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o000,
-		},
-		{
-			name:       "mode a-rx correct",
-			args:       []string{"a-rx", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o222,
-		},
-		{
-			name:       "mode a-x correct",
-			args:       []string{"a-x", filePath},
-			modeBefore: 0o777,
-			modeAfter:  0o666,
-		},
-		{
-			name:       "mode o+rwx correct",
-			args:       []string{"o+rwx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o007,
-		},
-		{
-			name:       "mode a+rwx correct",
-			args:       []string{"a+rwx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o777,
-		},
-		{
-			name:       "mode a+xrw correct",
-			args:       []string{"a+xrw", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o777,
-		},
-		{
-			name:       "mode a+xxxxxxxx correct",
-			args:       []string{"a+xxxxxxxx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o111,
-		},
-		{
-			name:       "mode o+xxxxx correct",
-			args:       []string{"o+xxxxx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o001,
-		},
-		{
-			name:       "mode a+rx correct",
-			args:       []string{"a+rx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o555,
-		},
-		{
-			name:       "mode a+r correct",
-			args:       []string{"a+r", filePath},
-			modeBefore: 0o111,
-			modeAfter:  0o555,
-		},
-		{
-			name:       "mode a=rwx correct",
-			args:       []string{"a=rwx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o777,
-		},
-		{
-			name:       "mode a=rx correct",
-			args:       []string{"a=rx", filePath},
-			modeBefore: 0o000,
-			modeAfter:  0o555,
-		},
-		{
-			name:      "bad reference file",
-			args:      []string{"a=rx", filePath},
-			reference: "filedoesnotexist",
-			err:       os.ErrNotExist,
-		},
-		{
-			name:       "correct reference file",
-			args:       []string{filePath},
-			modeBefore: 0o222,
-			modeAfter:  0o222,
-			reference:  filePath,
-		},
-		{
-			name:      "bad filepath",
-			args:      []string{"a=rx", "pathdoes not exist"},
-			recursive: true,
-			err:       os.ErrNotExist,
-		},
-		{
-			name:       "correct path filepath",
-			args:       []string{"0777", filePath},
-			recursive:  true,
-			modeBefore: 0o777,
-			modeAfter:  0o777,
-			err:        nil,
-		},
+		{name: "octal special bits", mode: "4755", current: 0o644, want: 0o4755},
+		{name: "omitted who plus respects umask", mode: "+w", current: 0o444, umask: 0o022, want: 0o644},
+		{name: "explicit all ignores umask", mode: "a+w", current: 0o444, umask: 0o022, want: 0o666},
+		{name: "omitted who minus preserves umasked bits", mode: "-w", current: 0o666, umask: 0o022, want: 0o466, conflict: true},
+		{name: "omitted who equals filters requested bits", mode: "=rw", current: 0o777, umask: 0o022, want: 0o644},
+		{name: "empty equals clears mode", mode: "=", current: 0o777, umask: 0o022, want: 0},
+		{name: "copy permissions", mode: "g=u", current: 0o600, want: 0o660},
+		{name: "sequential copy clauses", mode: "u=rw,g=u,o=g", current: 0o700, want: 0o666},
+		{name: "multiple groups per clause", mode: "og+rX-w", current: 0o600, want: 0o644},
+		{name: "X uses prior execute bit", mode: "a+X", current: 0o100, want: 0o111},
+		{name: "X for directory", mode: "a+X", current: 0, isDir: true, want: 0o111},
+		{name: "X not for non-executable file", mode: "a+X", current: 0, want: 0},
+		{name: "symbolic special bits", mode: "u+s,g+s,o+t", current: 0o755, want: 0o7755},
+		{name: "inapplicable special permissions", mode: "o+s,u+t,g+t", current: 0o755, want: 0o755},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			_ = os.Chmod(filePath, tt.modeBefore)
-
-			var cmdArgs []string
-			if tt.recursive {
-				cmdArgs = append(cmdArgs, "-recursive")
+			expr, err := parseModeExpression(tt.mode)
+			if err != nil {
+				t.Fatalf("parseModeExpression(%q): %v", tt.mode, err)
 			}
-			if tt.reference != "" {
-				cmdArgs = append(cmdArgs, "-reference", tt.reference)
-			}
-			cmdArgs = append(cmdArgs, tt.args...)
-
-			ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
-			err := run(context.Background(), ioEnv, cmdArgs...)
-			if !errors.Is(err, tt.err) {
-				t.Errorf("chmod(%v, %q, %q) = %v, want %v", tt.recursive, tt.reference, tt.args, err, tt.err)
-				return
-			}
-
-			// On POSIX systems, verify permission bits match exactly
-			if filepath.Separator == '/' && tt.err == nil {
-				fi, err := os.Stat(filePath)
-				if err != nil {
-					t.Fatalf("failed to stat file: %v", err)
-				}
-				if fi.Mode() != tt.modeAfter {
-					t.Errorf("chmod(%v, %q, %q) = mode = %o, want %o", tt.recursive, tt.reference, tt.args, fi.Mode(), tt.modeAfter)
-				}
+			got, conflict := expr.apply(tt.current, tt.isDir, tt.umask)
+			if got != tt.want || conflict != tt.conflict {
+				t.Fatalf("apply(%04o, umask %04o) = %04o, conflict %v; want %04o, conflict %v",
+					tt.current, tt.umask, got, conflict, tt.want, tt.conflict)
 			}
 		})
 	}
 }
 
-func TestMultipleFiles(t *testing.T) {
-	d1 := t.TempDir()
-	f1 := filepath.Join(d1, "tmpfile1")
-	if err := os.WriteFile(f1, []byte("1"), 0o644); err != nil {
+func TestParseModeExpressionRejectsInvalidModes(t *testing.T) {
+	for _, mode := range []string{
+		"",
+		"77778",
+		"10000",
+		"rwx",
+		"u+",
+		"u+r,",
+		"u+q",
+		"u+ru",
+		"g=ux",
+	} {
+		t.Run(strconv.Quote(mode), func(t *testing.T) {
+			if _, err := parseModeExpression(mode); err == nil {
+				t.Fatalf("parseModeExpression(%q) succeeded", mode)
+			}
+		})
+	}
+}
+
+func TestPOSIXGoFileModeConversion(t *testing.T) {
+	for _, mode := range []uint16{0, 0o644, 0o4755, 0o2750, 0o1777, 0o7777} {
+		if got := fileModeToPOSIX(posixModeToFileMode(mode)); got != mode {
+			t.Errorf("round-trip %04o = %04o", mode, got)
+		}
+	}
+}
+
+func TestRunChmodModesAndReporting(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("POSIX permission semantics are not available on this platform")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file")
+	if err := os.WriteFile(path, []byte("data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	d2 := t.TempDir()
-	f2 := filepath.Join(d2, "tmpfile2")
-	if err := os.WriteFile(f2, []byte("2"), 0o644); err != nil {
-		t.Fatal(err)
+	var out strings.Builder
+	ioEnv := core.IO{Stdout: &out, Stderr: io.Discard, Dir: dir}
+	if err := run(context.Background(), ioEnv, "04755", "file"); err != nil {
+		t.Fatalf("run chmod 04755: %v", err)
+	}
+	assertMode(t, path, 0o4755)
+
+	out.Reset()
+	if err := run(context.Background(), ioEnv, "-c", "04755", "file"); err != nil {
+		t.Fatalf("run unchanged chmod with -c: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("-c output for unchanged mode = %q, want empty", out.String())
 	}
 
-	stderr := &bytes.Buffer{}
-	ioEnv := core.IO{Stdout: io.Discard, Stderr: stderr}
+	out.Reset()
+	if err := run(context.Background(), ioEnv, "-c", "-v", "0600", "file"); err != nil {
+		t.Fatalf("run chmod with -c -v: %v", err)
+	}
+	if !strings.Contains(out.String(), "changed from 4755") {
+		t.Fatalf("-c -v output = %q, want verbose change report", out.String())
+	}
+	assertMode(t, path, 0o600)
 
-	err := run(context.Background(), ioEnv, "0777", f1, "filenotexists", f2)
+	out.Reset()
+	if err := run(context.Background(), ioEnv, "-v", "-c", "0600", "file"); err != nil {
+		t.Fatalf("run chmod with -v -c: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("-v -c output for unchanged mode = %q, want empty", out.String())
+	}
+
+	refPath := filepath.Join(dir, "reference")
+	if err := os.WriteFile(refPath, []byte("ref"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(refPath, posixModeToFileMode(0o2750)); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), ioEnv, "--reference=reference", "file"); err != nil {
+		t.Fatalf("run chmod --reference: %v", err)
+	}
+	assertMode(t, path, 0o2750)
+}
+
+func TestRunChmodMultipleOperandsAndQuietErrors(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first")
+	last := filepath.Join(dir, "last")
+	for _, path := range []string{first, last} {
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ioEnv := core.IO{Stdout: io.Discard, Stderr: io.Discard}
+
+	err := run(context.Background(), ioEnv, "0600", first, filepath.Join(dir, "missing"), last)
 	if !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("expected os.ErrNotExist, got %v", err)
+		t.Fatalf("run with missing middle operand error = %v, want os.ErrNotExist", err)
+	}
+	assertMode(t, first, 0o600)
+	assertMode(t, last, 0o600)
+
+	var stderr strings.Builder
+	ioEnv.Stderr = &stderr
+	code := Main(context.Background(), ioEnv, "-f", "0600", filepath.Join(dir, "missing"))
+	if code == 0 {
+		t.Fatal("chmod -f with missing target returned success")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("chmod -f stderr = %q, want empty", stderr.String())
 	}
 
-	if filepath.Separator == '/' {
-		fi, err := os.Stat(f1)
-		if err != nil {
-			t.Fatalf("failed to stat file: %v", err)
-		}
-		if fi.Mode() != 0o777 {
-			t.Errorf("chmod(%q) = %o, want %o", f1, fi.Mode(), 0o777)
-		}
+	stderr.Reset()
+	code = Main(context.Background(), ioEnv, "-f", "9999", first)
+	if code == 0 {
+		t.Fatal("chmod -f with invalid mode returned success")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("chmod -f invalid-mode stderr = %q, want empty", stderr.String())
+	}
+	assertMode(t, first, 0o600)
+}
 
-		fi, err = os.Stat(f2)
-		if err != nil {
-			t.Fatalf("failed to stat file: %v", err)
-		}
-		if fi.Mode() != 0o777 {
-			t.Errorf("chmod(%q) = %o, want %o", f2, fi.Mode(), 0o777)
+func TestMainRejectsUnsupportedOptionsAndPrintsHelp(t *testing.T) {
+	for _, option := range []string{"-H", "-L", "-P", "-h", "--dereference", "--no-dereference", "--from=0644"} {
+		t.Run(option, func(t *testing.T) {
+			var stderr strings.Builder
+			ioEnv := core.IO{Stdout: io.Discard, Stderr: &stderr}
+			if code := Main(context.Background(), ioEnv, option, "0644", "file"); code == 0 {
+				t.Fatalf("Main(%q) returned success", option)
+			}
+			if stderr.Len() == 0 {
+				t.Fatalf("Main(%q) emitted no diagnostic", option)
+			}
+		})
+	}
+
+	var stdout strings.Builder
+	ioEnv := core.IO{Stdout: &stdout, Stderr: io.Discard}
+	if code := Main(context.Background(), ioEnv, "--help"); code != 0 {
+		t.Fatalf("Main(--help) = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "chmod") {
+		t.Fatalf("--help output = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	if code := Main(context.Background(), ioEnv, "--version"); code != 0 {
+		t.Fatalf("Main(--version) = %d, want 0", code)
+	}
+	if !strings.Contains(stdout.String(), "u-root") {
+		t.Fatalf("--version output = %q", stdout.String())
+	}
+}
+
+func TestRecursivePreserveRoot(t *testing.T) {
+	if filepath.Separator != '/' {
+		t.Skip("root protection test uses the Linux guest root")
+	}
+	var stderr strings.Builder
+	ioEnv := core.IO{Stdout: io.Discard, Stderr: &stderr}
+	if code := Main(context.Background(), ioEnv, "-R", "0000", string(os.PathSeparator)); code == 0 {
+		t.Fatal("recursive chmod on root unexpectedly succeeded")
+	}
+	if !strings.Contains(stderr.String(), "refusing to operate recursively on root") {
+		t.Fatalf("root protection diagnostic = %q", stderr.String())
+	}
+}
+
+func assertMode(t *testing.T, path string, want uint16) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	if filepath.Separator == '/' {
+		if got := fileModeToPOSIX(info.Mode()); got != want {
+			t.Fatalf("mode of %q = %04o, want %04o", path, got, want)
 		}
 	}
 }

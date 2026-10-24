@@ -82,6 +82,8 @@ func (r *Runner) builtinCode(ctx context.Context, pos syntax.Pos, name string, a
 			return 2
 		}
 		r.updateExpandOpts()
+	case "umask":
+		return r.runUmask(args)
 	case "shift":
 		n := 1
 		switch len(args) {
