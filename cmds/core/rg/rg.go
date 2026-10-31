@@ -8,6 +8,8 @@ package rg
 import (
 	"bufio"
 	"bytes"
+	"compress/bzip2"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -15,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,13 +25,18 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/klauspost/compress/zstd"
+	"github.com/pierrec/lz4/v4"
 	"github.com/u-root/u-root/cmds/core/search"
 	"github.com/u-root/u-root/pkg/core"
+	"github.com/ulikunitz/xz"
+	"github.com/ulikunitz/xz/lzma"
 )
 
 type options struct {
 	fixed, ignoreCase, invert, word, wholeLine, perl                        bool
-	hidden, noIgnore, text, follow, nullData                                bool
+	hidden, noIgnore, text, follow, nullData, multiline, searchZip          bool
+	globCaseInsensitive, stats                                              bool
 	lineNumber, column, withFilename, noFilename                            bool
 	count, countMatches, files, filesWithMatches, filesWithoutMatch         bool
 	onlyMatching, quiet, json, noHeading, typeList, nullFilename, smartCase bool
@@ -56,6 +64,11 @@ type command struct {
 	found, hadError bool
 	color           bool
 	seen            map[string]struct{}
+	stats           searchStats
+}
+
+type searchStats struct {
+	matches, matchedLines, filesWithMatches, filesSearched, bytesSearched int64
 }
 
 var errStop = errors.New("quiet match")
@@ -119,6 +132,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 			fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 			return 2
 		}
+		cmd.writeStats()
 		if cmd.hadError {
 			return 2
 		}
@@ -148,6 +162,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 		return 2
 	}
+	cmd.writeStats()
 	if cmd.hadError {
 		return 2
 	}
@@ -226,6 +241,12 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 				opts.noIgnore = true
 			case "--text":
 				opts.text = true
+			case "--search-zip":
+				opts.searchZip = true
+			case "--glob-case-insensitive":
+				opts.globCaseInsensitive = true
+			case "--stats":
+				opts.stats = true
 			case "--follow":
 				opts.follow = true
 			case "--line-number":
@@ -489,7 +510,9 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 					case 'P':
 						opts.perl = true
 					case 'U':
-						return opts, nil, fmt.Errorf("multiline search (-U) is not yet supported")
+						opts.multiline = true
+					case 'z':
+						opts.searchZip = true
 					case 'c':
 						opts.count = true
 					default:
@@ -525,7 +548,11 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 	}
 	paths = append(paths, positional...)
 	if len(paths) == 0 {
-		paths = []string{"."}
+		if opts.stdin == nil && !ioEnv.StdinIsTerminal {
+			paths = []string{"-"}
+		} else {
+			paths = []string{"."}
+		}
 	}
 	return opts, paths, nil
 }
@@ -564,9 +591,20 @@ func (c *command) run(paths []string) error {
 			continue
 		}
 		resolved := c.ioEnv.ResolvePath(path)
-		if err := c.searchPath(resolved, path, nil, 0, false); err != nil {
+		display := filepath.ToSlash(path)
+		var inherited []ignoreRule
+		var err error
+		if !c.opts.noIgnore {
+			inherited, err = c.globalIgnoreRules(resolved)
+			if err != nil {
+				c.hadError = true
+				fmt.Fprintf(c.errOut, "rg: %s: %v\n", display, err)
+				continue
+			}
+		}
+		if err := c.searchPath(resolved, display, inherited, 0, false); err != nil {
 			c.hadError = true
-			fmt.Fprintf(c.errOut, "rg: %s: %v\n", path, err)
+			fmt.Fprintf(c.errOut, "rg: %s: %v\n", display, err)
 		}
 	}
 	return nil
@@ -609,7 +647,11 @@ func (c *command) searchPath(path, display string, inherited []ignoreRule, depth
 		}
 		rules := append([]ignoreRule(nil), inherited...)
 		if !c.opts.noIgnore {
-			rules = append(rules, loadIgnoreRules(path, display)...)
+			localRules, err := loadIgnoreRules(path, display)
+			if err != nil {
+				return err
+			}
+			rules = append(rules, localRules...)
 		}
 		var entries []os.DirEntry
 		if c.opts.sort == "path" {
@@ -635,7 +677,7 @@ func (c *command) searchPath(path, display string, inherited []ignoreRule, depth
 			if err := c.ctx.Err(); err != nil {
 				return err
 			}
-			childDisplay := filepath.Join(display, entry.Name())
+			childDisplay := pathpkg.Join(filepath.ToSlash(display), entry.Name())
 			if !c.opts.hidden && hiddenPath(entry.Name()) {
 				continue
 			}
@@ -671,6 +713,17 @@ func (c *command) searchPath(path, display string, inherited []ignoreRule, depth
 		return err
 	}
 	defer file.Close()
+	display = filepath.ToSlash(display)
+	if c.opts.searchZip {
+		reader, closeReader, err := decompressedReader(file, display)
+		if err != nil {
+			return err
+		}
+		if closeReader != nil {
+			defer closeReader.Close()
+		}
+		return c.searchReader(reader, display, true)
+	}
 	return c.searchReader(file, display, true)
 }
 
@@ -690,6 +743,22 @@ func (c *command) wasSeen(path string) bool {
 }
 
 func (c *command) searchReader(reader io.Reader, name string, named bool) error {
+	name = filepath.ToSlash(name)
+	if c.opts.multiline {
+		return c.searchMultiline(reader, name, named)
+	}
+	var offset int64
+	var selected, totalMatches int
+	matchedFile := false
+	c.stats.filesSearched++
+	defer func() {
+		c.stats.bytesSearched += offset
+		c.stats.matchedLines += int64(selected)
+		c.stats.matches += int64(totalMatches)
+		if matchedFile {
+			c.stats.filesWithMatches++
+		}
+	}()
 	delim := byte('\n')
 	if c.opts.nullData {
 		delim = 0
@@ -730,8 +799,6 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 	br := bufio.NewReader(reader)
 	var before []line
 	lineNumber := 0
-	var offset int64
-	selected, totalMatches := 0, 0
 	lastOut := 0
 	afterLeft := 0
 	binaryFile := false
@@ -777,6 +844,7 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 		if isMatch {
 			selected++
 			totalMatches += len(matches)
+			matchedFile = true
 			c.found = true
 			if c.opts.quiet {
 				return errStop
@@ -863,6 +931,220 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 		})
 	}
 	return nil
+}
+
+func (c *command) searchMultiline(reader io.Reader, name string, named bool) error {
+	c.stats.filesSearched++
+	if c.opts.json && !c.opts.quiet {
+		if err := c.jsonEvent("begin", map[string]any{"path": jsonPath(name)}); err != nil {
+			return err
+		}
+	}
+	if c.opts.maxCount == 0 {
+		if c.opts.count || c.opts.countMatches {
+			if named && c.showFilename(name) {
+				sep := ":"
+				if c.opts.nullFilename {
+					sep = "\x00"
+				}
+				if _, err := fmt.Fprintf(c.out, "%s%s0\n", name, sep); err != nil {
+					return err
+				}
+			} else if _, err := fmt.Fprintln(c.out, 0); err != nil {
+				return err
+			}
+		}
+		if c.opts.filesWithoutMatch {
+			c.found = true
+			return c.writeFileName(name)
+		}
+		if c.opts.json && !c.opts.quiet {
+			return c.jsonEvent("end", map[string]any{
+				"path": jsonPath(name), "binary_offset": nil,
+				"stats": map[string]int{"matches": 0, "searches": 1, "searches_with_match": 0, "bytes_searched": 0},
+			})
+		}
+		return nil
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return err
+	}
+	c.stats.bytesSearched += int64(len(data))
+	if !c.opts.text && bytes.IndexByte(data, 0) >= 0 {
+		if c.opts.json && !c.opts.quiet {
+			return c.jsonEvent("end", map[string]any{
+				"path": jsonPath(name), "binary_offset": bytes.IndexByte(data, 0),
+				"stats": map[string]int{"matches": 0, "searches": 1, "searches_with_match": 0, "bytes_searched": 0},
+			})
+		}
+		return nil
+	}
+
+	delim := byte('\n')
+	if c.opts.nullData {
+		delim = 0
+	}
+	lines := splitLines(data, delim)
+	allMatches := c.matcher.FindAllIndex(data, 0)
+	lineMatches := make([][][]int, len(lines))
+	lineMatchCounts := make([]int, len(lines))
+	lineSelected := make([]bool, len(lines))
+	for _, span := range allMatches {
+		for i, item := range lines {
+			recordStart := int(item.offset)
+			contentEnd := recordStart + len(item.data)
+			recordEnd := contentEnd
+			if item.terminated {
+				recordEnd++
+			}
+			overlaps := span[0] < recordEnd && span[1] > recordStart
+			if span[0] == span[1] && span[0] >= recordStart && span[0] <= recordEnd {
+				overlaps = true
+			}
+			if !overlaps {
+				continue
+			}
+			lineSelected[i] = true
+			if span[0] >= recordStart && span[0] <= contentEnd {
+				lineMatchCounts[i]++
+			}
+			start := max(span[0], recordStart)
+			end := min(span[1], contentEnd)
+			if start < end {
+				lineMatches[i] = append(lineMatches[i], []int{start - recordStart, end - recordStart})
+			}
+		}
+	}
+
+	selected, totalMatches := 0, 0
+	matchedFile := false
+	lastOut, afterLeft := 0, 0
+	var before []line
+	for i, item := range lines {
+		if err := c.ctx.Err(); err != nil {
+			return err
+		}
+		matchLine := lineSelected[i]
+		isSelected := matchLine
+		if c.opts.invert {
+			isSelected = !matchLine
+		}
+		if isSelected {
+			selected++
+			matchedFile = true
+			c.found = true
+			totalMatches += lineMatchCounts[i]
+			if c.opts.quiet {
+				c.stats.matches += int64(totalMatches)
+				c.stats.matchedLines += int64(selected)
+				c.stats.filesWithMatches++
+				return errStop
+			}
+			if c.opts.filesWithMatches {
+				c.stats.matches += int64(totalMatches)
+				c.stats.matchedLines += int64(selected)
+				c.stats.filesWithMatches++
+				return c.writeFileName(name)
+			}
+			if !c.opts.count && !c.opts.countMatches {
+				for _, old := range before {
+					if old.number > lastOut {
+						if err := c.emit(name, old, false, nil, named, &lastOut); err != nil {
+							return err
+						}
+					}
+				}
+				if !c.opts.json && lastOut != 0 && item.number > lastOut+1 {
+					if _, err := io.WriteString(c.out, c.opts.contextSeparator); err != nil {
+						return err
+					}
+					if err := c.out.WriteByte(delimiter(c.opts.nullData)); err != nil {
+						return err
+					}
+				}
+				spans := lineMatches[i]
+				if c.opts.invert {
+					spans = nil
+				}
+				if err := c.emit(name, item, true, spans, named, &lastOut); err != nil {
+					return err
+				}
+				afterLeft = c.opts.after
+				before = nil
+			}
+		} else if afterLeft > 0 && !c.opts.count && !c.opts.countMatches {
+			if err := c.emit(name, item, false, nil, named, &lastOut); err != nil {
+				return err
+			}
+			afterLeft--
+		} else if c.opts.before > 0 && !c.opts.count && !c.opts.countMatches {
+			before = append(before, item)
+			if len(before) > c.opts.before {
+				before = before[len(before)-c.opts.before:]
+			}
+		}
+		if c.opts.maxCount > 0 && selected >= c.opts.maxCount {
+			break
+		}
+	}
+	if selected > 0 {
+		c.stats.matches += int64(totalMatches)
+		c.stats.matchedLines += int64(selected)
+		c.stats.filesWithMatches++
+	}
+	if c.opts.count || c.opts.countMatches {
+		value := selected
+		if c.opts.countMatches {
+			value = totalMatches
+		}
+		if named && c.showFilename(name) {
+			sep := ":"
+			if c.opts.nullFilename {
+				sep = "\x00"
+			}
+			if _, err := fmt.Fprintf(c.out, "%s%s%d\n", name, sep, value); err != nil {
+				return err
+			}
+		} else if _, err := fmt.Fprintf(c.out, "%d\n", value); err != nil {
+			return err
+		}
+	}
+	if c.opts.filesWithoutMatch && !matchedFile {
+		c.found = true
+		return c.writeFileName(name)
+	}
+	if c.opts.json && !c.opts.quiet {
+		return c.jsonEvent("end", map[string]any{
+			"path": jsonPath(name), "binary_offset": nil,
+			"stats": map[string]int{
+				"matches": totalMatches, "searches": 1,
+				"searches_with_match": boolInt(selected > 0), "bytes_searched": len(data),
+			},
+		})
+	}
+	return nil
+}
+
+func splitLines(data []byte, delim byte) []line {
+	var lines []line
+	for offset := 0; offset < len(data); {
+		end := bytes.IndexByte(data[offset:], delim)
+		if end < 0 {
+			lines = append(lines, line{
+				data: append([]byte(nil), data[offset:]...), number: len(lines) + 1,
+				offset: int64(offset),
+			})
+			break
+		}
+		recordEnd := offset + end
+		lines = append(lines, line{
+			data: append([]byte(nil), data[offset:recordEnd]...), number: len(lines) + 1,
+			offset: int64(offset), terminated: true,
+		})
+		offset = recordEnd + 1
+	}
+	return lines
 }
 
 type line struct {
@@ -961,6 +1243,13 @@ func (c *command) showFilename(name string) bool {
 	return c.opts.withFilename || name != "(standard input)"
 }
 
+func (c *command) writeFileName(name string) error {
+	if _, err := io.WriteString(c.out, filepath.ToSlash(name)); err != nil {
+		return err
+	}
+	return c.out.WriteByte(byte(outputDelimiter(c.opts.nullFilename)[0]))
+}
+
 func delimiter(null bool) byte {
 	if null {
 		return 0
@@ -1027,7 +1316,7 @@ func (c *command) pathSelected(path string, dir bool) bool {
 		if negate {
 			glob = strings.TrimPrefix(glob, "!")
 		}
-		if globMatch(glob, path) || globMatch(glob, filepath.Base(path)) {
+		if globMatchCase(glob, path, c.opts.globCaseInsensitive) || globMatchCase(glob, filepath.Base(path), c.opts.globCaseInsensitive) {
 			allow = !negate
 		}
 	}
@@ -1058,33 +1347,227 @@ func globMatch(pattern, name string) bool {
 	return false
 }
 
-func loadIgnoreRules(dir, display string) []ignoreRule {
+func globMatchCase(pattern, name string, ignoreCase bool) bool {
+	if !ignoreCase {
+		return globMatch(pattern, name)
+	}
+	return globMatch(strings.ToLower(pattern), strings.ToLower(name))
+}
+
+type closeFunc func() error
+
+func (f closeFunc) Close() error {
+	return f()
+}
+
+func decompressedReader(reader io.Reader, name string) (io.Reader, io.Closer, error) {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".gz", ".gzip":
+		decoded, err := gzip.NewReader(reader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open gzip stream: %w", err)
+		}
+		return decoded, decoded, nil
+	case ".bz2", ".bzip2":
+		return bzip2.NewReader(reader), nil, nil
+	case ".xz":
+		decoded, err := xz.NewReader(reader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open xz stream: %w", err)
+		}
+		return decoded, nil, nil
+	case ".lz4":
+		return lz4.NewReader(reader), nil, nil
+	case ".lzma":
+		decoded, err := lzma.NewReader(reader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open lzma stream: %w", err)
+		}
+		return decoded, nil, nil
+	case ".zst", ".zstd":
+		decoded, err := zstd.NewReader(reader)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open zstd stream: %w", err)
+		}
+		return decoded, closeFunc(func() error {
+			decoded.Close()
+			return nil
+		}), nil
+	default:
+		return reader, nil, nil
+	}
+}
+
+func loadIgnoreRules(dir, display string) ([]ignoreRule, error) {
 	var out []ignoreRule
 	// Lower-precedence files are loaded first; later local rules override them.
 	for _, file := range []string{".gitignore", ".ignore", ".rgignore"} {
-		data, err := os.ReadFile(filepath.Join(dir, file))
+		filename := filepath.Join(dir, file)
+		data, found, err := readOptionalFile(filename)
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("read ignore file %q: %w", filename, err)
 		}
-		for _, raw := range strings.Split(string(data), "\n") {
-			line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			rule := ignoreRule{base: filepath.ToSlash(display), pattern: filepath.ToSlash(line)}
-			if strings.HasPrefix(rule.pattern, "!") {
-				rule.negate, rule.pattern = true, strings.TrimPrefix(rule.pattern, "!")
-			}
-			if strings.HasPrefix(rule.pattern, "/") {
-				rule.anchored, rule.pattern = true, strings.TrimPrefix(rule.pattern, "/")
-			}
-			if strings.HasSuffix(rule.pattern, "/") {
-				rule.dirOnly, rule.pattern = true, strings.TrimSuffix(rule.pattern, "/")
-			}
-			out = append(out, rule)
+		if found {
+			out = append(out, parseIgnoreRules(data, filepath.ToSlash(display))...)
 		}
 	}
+	return out, nil
+}
+
+func parseIgnoreRules(data []byte, base string) []ignoreRule {
+	var out []ignoreRule
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		rule := ignoreRule{base: filepath.ToSlash(base), pattern: filepath.ToSlash(line)}
+		if strings.HasPrefix(rule.pattern, "!") {
+			rule.negate, rule.pattern = true, strings.TrimPrefix(rule.pattern, "!")
+		}
+		if strings.HasPrefix(rule.pattern, "/") {
+			rule.anchored, rule.pattern = true, strings.TrimPrefix(rule.pattern, "/")
+		}
+		if strings.HasSuffix(rule.pattern, "/") {
+			rule.dirOnly, rule.pattern = true, strings.TrimSuffix(rule.pattern, "/")
+		}
+		out = append(out, rule)
+	}
 	return out
+}
+
+func (c *command) globalIgnoreRules(start string) ([]ignoreRule, error) {
+	var out []ignoreRule
+	home := c.ioEnv.Getenv("HOME")
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	globalConfig := c.ioEnv.Getenv("GIT_CONFIG_GLOBAL")
+	var configPaths []string
+	if globalConfig != "" {
+		configPaths = append(configPaths, globalConfig)
+	} else if home != "" {
+		configPaths = append(configPaths,
+			filepath.Join(home, ".gitconfig"),
+			filepath.Join(home, ".config", "git", "config"),
+		)
+	}
+	excludesFile := ""
+	for _, configPath := range configPaths {
+		data, found, err := readOptionalFile(c.ioEnv.ResolvePath(configPath))
+		if err != nil {
+			return nil, fmt.Errorf("read Git config %q: %w", configPath, err)
+		}
+		if !found {
+			continue
+		}
+		excludesFile = configuredExcludesFile(string(data))
+		if excludesFile != "" {
+			if strings.HasPrefix(excludesFile, "~/") && home != "" {
+				excludesFile = filepath.Join(home, filepath.FromSlash(excludesFile[2:]))
+			} else if !filepath.IsAbs(excludesFile) {
+				excludesFile = filepath.Join(filepath.Dir(configPath), excludesFile)
+			}
+		}
+		if excludesFile != "" {
+			break
+		}
+	}
+	if excludesFile == "" && home != "" {
+		excludesFile = filepath.Join(home, ".config", "git", "ignore")
+	}
+	if excludesFile != "" {
+		data, found, err := readOptionalFile(c.ioEnv.ResolvePath(excludesFile))
+		if err != nil {
+			return nil, fmt.Errorf("read global Git excludes %q: %w", excludesFile, err)
+		}
+		if found {
+			out = append(out, parseIgnoreRules(data, ".")...)
+		}
+	}
+	gitDir, err := findGitDir(start)
+	if err != nil {
+		return nil, err
+	}
+	if gitDir != "" {
+		filename := filepath.Join(gitDir, "info", "exclude")
+		data, found, err := readOptionalFile(filename)
+		if err != nil {
+			return nil, fmt.Errorf("read Git info exclude %q: %w", filename, err)
+		}
+		if found {
+			out = append(out, parseIgnoreRules(data, ".")...)
+		}
+	}
+	return out, nil
+}
+
+func readOptionalFile(filename string) ([]byte, bool, error) {
+	data, err := os.ReadFile(filename)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, nil
+}
+
+func configuredExcludesFile(config string) string {
+	inCore := false
+	for _, raw := range strings.Split(config, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			inCore = strings.EqualFold(strings.TrimSpace(line[1:len(line)-1]), "core")
+			continue
+		}
+		if !inCore {
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || !strings.EqualFold(strings.TrimSpace(key), "excludesfile") {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(value), `"`)
+	}
+	return ""
+}
+
+func findGitDir(start string) (string, error) {
+	dir := start
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+	for {
+		candidate := filepath.Join(dir, ".git")
+		info, err := os.Stat(candidate)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("inspect Git directory %q: %w", candidate, err)
+		}
+		if err == nil {
+			if info.IsDir() {
+				return candidate, nil
+			}
+			data, err := os.ReadFile(candidate)
+			if err == nil {
+				line := strings.TrimSpace(string(data))
+				if strings.HasPrefix(strings.ToLower(line), "gitdir:") {
+					target := strings.TrimSpace(line[len("gitdir:"):])
+					if !filepath.IsAbs(target) {
+						target = filepath.Join(dir, target)
+					}
+					return filepath.Clean(target), nil
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return "", fmt.Errorf("read Git directory marker %q: %w", candidate, err)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
 }
 
 func ignored(path string, isDir bool, rules []ignoreRule) bool {
@@ -1151,6 +1634,7 @@ func splitPatterns(data []byte) []string {
 }
 
 func jsonPath(path string) map[string]string {
+	path = filepath.ToSlash(path)
 	if utf8.ValidString(path) {
 		return map[string]string{"text": path}
 	}
@@ -1191,6 +1675,14 @@ func (c *command) jsonLine(name string, item line, spans [][]int, matched bool) 
 
 func (c *command) jsonEvent(eventType string, data map[string]any) error {
 	return json.NewEncoder(c.out).Encode(map[string]any{"type": eventType, "data": data})
+}
+
+func (c *command) writeStats() {
+	if !c.opts.stats {
+		return
+	}
+	fmt.Fprintf(c.errOut, "%d matches\n%d matched lines\n%d files contained matches\n%d files searched\n%d bytes searched\n",
+		c.stats.matches, c.stats.matchedLines, c.stats.filesWithMatches, c.stats.filesSearched, c.stats.bytesSearched)
 }
 
 func boolInt(v bool) int {

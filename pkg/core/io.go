@@ -20,12 +20,14 @@ type IO struct {
 	Stdout           io.Writer
 	Stderr           io.Writer
 	Dir              string
+	StdinIsTerminal  bool
 	StdoutIsTerminal bool
 	TerminalWidth    int
 	LookupEnv        LookupEnvFunc
 	Setenv           func(key, value string) error
 	Environ          func() []string
 	Runner           func(ctx context.Context, ioEnv IO, args ...string) int
+	ShellRunner      func(ctx context.Context, ioEnv IO, command string) (int, error)
 	IsBuiltin        func(name string) bool
 }
 

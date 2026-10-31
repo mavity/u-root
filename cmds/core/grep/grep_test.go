@@ -16,6 +16,14 @@ import (
 	"github.com/u-root/u-root/pkg/core"
 )
 
+type pipeLikeReader struct {
+	*bytes.Buffer
+}
+
+func (r *pipeLikeReader) Seek(int64, int) (int64, error) {
+	return 0, os.ErrInvalid
+}
+
 func TestStdinGrep(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -455,5 +463,50 @@ func TestGrepSilentDoesNotSuppressMatches(t *testing.T) {
 	ioEnv := core.IO{Stdin: strings.NewReader("found\n"), Stdout: &out, Stderr: &errOut}
 	if code := Main(context.Background(), ioEnv, "-s", "found"); code != 0 || out.String() != "found\n" {
 		t.Fatalf("-s must not imply quiet mode: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestGrepBinaryModes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.dat")
+	data := []byte("needle\x00tail\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(args ...string) (int, []byte, string) {
+		t.Helper()
+		var out, errOut bytes.Buffer
+		code := Main(context.Background(), core.IO{Stdout: &out, Stderr: &errOut, Dir: dir}, args...)
+		return code, out.Bytes(), errOut.String()
+	}
+
+	code, stdout, stderr := run("needle", "binary.dat")
+	if code != 0 || stderr != "" || string(stdout) != "Binary file binary.dat matches\n" {
+		t.Fatalf("default binary mode: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = run("-I", "needle", "binary.dat")
+	if code != 1 || stderr != "" || len(stdout) != 0 {
+		t.Fatalf("without-match mode: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = run("-I", "-c", "needle", "binary.dat")
+	if code != 1 || stderr != "" || string(stdout) != "0\n" {
+		t.Fatalf("without-match count: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = run("-a", "needle", "binary.dat")
+	if code != 0 || stderr != "" || !bytes.Equal(stdout, data) {
+		t.Fatalf("text mode: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestGrepBinaryModeWithUnseekableInput(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  &pipeLikeReader{Buffer: bytes.NewBuffer([]byte("needle\x00tail\n"))},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}, "-I", "needle")
+	if code != 1 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("unseekable binary input: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }

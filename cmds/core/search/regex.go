@@ -32,6 +32,39 @@ type Matcher struct {
 	word    bool
 }
 
+type lookaroundRegexp struct {
+	main       indexedRegexp
+	assertion  indexedRegexp
+	positive   bool
+	lookbehind bool
+}
+
+func (r lookaroundRegexp) FindAllIndex(data []byte, n int) [][]int {
+	matches := r.main.FindAllIndex(data, -1)
+	out := make([][]int, 0, len(matches))
+	for _, match := range matches {
+		start := match[0]
+		asserted := false
+		if r.lookbehind {
+			for _, assertion := range r.assertion.FindAllIndex(data[:start], -1) {
+				if assertion[1] == start {
+					asserted = true
+					break
+				}
+			}
+		} else if assertion := r.assertion.FindAllIndex(data[start:], 1); len(assertion) != 0 && assertion[0][0] == 0 {
+			asserted = true
+		}
+		if asserted == r.positive {
+			out = append(out, match)
+			if n >= 0 && len(out) >= n {
+				break
+			}
+		}
+	}
+	return out
+}
+
 func Compile(patterns []string, opts Options) (*Matcher, error) {
 	m := &Matcher{word: opts.WholeWord}
 	for _, pattern := range patterns {
@@ -46,9 +79,8 @@ func Compile(patterns []string, opts Options) (*Matcher, error) {
 		if opts.Fixed {
 			expr = regexp.QuoteMeta(expr)
 		}
-		if opts.WholeWord {
-			expr = `(?:` + expr + `)`
-		}
+		assertion, rest, positive, behind, hasLookaround := leadingLookaround(expr)
+		expr = rest
 		if opts.WholeLine {
 			expr = `^(?:` + expr + `)$`
 		}
@@ -59,7 +91,29 @@ func Compile(patterns []string, opts Options) (*Matcher, error) {
 		var re indexedRegexp
 		var err error
 		if opts.Perl {
-			re, err = regast.CompileWithFlags(expr, syntax.Perl|syntax.Backref)
+			if hasLookaround {
+				main, mainErr := regast.CompileWithFlags(expr, syntax.Perl|syntax.Backref)
+				if mainErr != nil {
+					return nil, fmt.Errorf("pattern %q: %w", pattern, mainErr)
+				}
+				assertionExpr := assertion
+				if !behind {
+					assertionExpr = `^(?:` + assertionExpr + `)`
+				}
+				if opts.IgnoreCase {
+					assertionExpr = `(?i)` + assertionExpr
+				}
+				assertionRE, assertionErr := regast.CompileWithFlags(assertionExpr, syntax.Perl|syntax.Backref)
+				if assertionErr != nil {
+					return nil, fmt.Errorf("pattern %q look-around: %w", pattern, assertionErr)
+				}
+				re = lookaroundRegexp{
+					main: main, assertion: assertionRE, positive: positive,
+					lookbehind: behind,
+				}
+			} else {
+				re, err = regast.CompileWithFlags(expr, syntax.Perl|syntax.Backref)
+			}
 		} else {
 			re, err = regexp.Compile(expr)
 		}
@@ -72,6 +126,44 @@ func Compile(patterns []string, opts Options) (*Matcher, error) {
 		return nil, fmt.Errorf("no patterns supplied")
 	}
 	return m, nil
+}
+
+func leadingLookaround(pattern string) (assertion, rest string, positive, behind, ok bool) {
+	prefix := 0
+	switch {
+	case strings.HasPrefix(pattern, `(?=`):
+		prefix, positive = 3, true
+	case strings.HasPrefix(pattern, `(?!`):
+		prefix = 3
+	case strings.HasPrefix(pattern, `(?<=`):
+		prefix, positive, behind = 4, true, true
+	case strings.HasPrefix(pattern, `(?<!`):
+		prefix, behind = 4, true
+	default:
+		return "", pattern, false, false, false
+	}
+	depth := 1
+	inClass, escaped := false, false
+	for i := prefix; i < len(pattern); i++ {
+		switch {
+		case escaped:
+			escaped = false
+		case pattern[i] == '\\':
+			escaped = true
+		case pattern[i] == '[' && !inClass:
+			inClass = true
+		case pattern[i] == ']' && inClass:
+			inClass = false
+		case !inClass && pattern[i] == '(':
+			depth++
+		case !inClass && pattern[i] == ')':
+			depth--
+			if depth == 0 {
+				return pattern[prefix:i], pattern[i+1:], positive, behind, true
+			}
+		}
+	}
+	return "", pattern, false, false, false
 }
 
 func (m *Matcher) Match(record []byte) bool {

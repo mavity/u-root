@@ -3,6 +3,7 @@ package sed
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,6 +21,65 @@ func runSedTest(t *testing.T, input string, args ...string) (string, string, int
 		Dir:    t.TempDir(),
 	}, args...)
 	return stdout.String(), stderr.String(), code
+}
+
+func TestExecuteCommandsUseInjectedShell(t *testing.T) {
+	tests := []struct {
+		name, input, command, shellOutput, output string
+		args                                      []string
+	}{
+		{
+			name: "e command", input: "input\n", args: []string{`e printf generated`},
+			command: "printf generated", shellOutput: "generated\n", output: "generated\ninput\n",
+		},
+		{
+			name: "substitution e flag", input: "needle\n", args: []string{"-n", `s/needle/printf computed/e;p`},
+			command: "printf computed", shellOutput: "computed\n", output: "computed\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			calls := 0
+			dir := t.TempDir()
+			ioEnv := core.IO{
+				Stdin:  bytes.NewBufferString(tt.input),
+				Stdout: &stdout,
+				Stderr: &stderr,
+				Dir:    dir,
+				ShellRunner: func(ctx context.Context, shellIO core.IO, command string) (int, error) {
+					calls++
+					if command != tt.command {
+						t.Fatalf("shell command = %q, want %q", command, tt.command)
+					}
+					if shellIO.Dir != dir {
+						t.Fatalf("shell cwd = %q, want %q", shellIO.Dir, dir)
+					}
+					_, err := io.WriteString(shellIO.Stdout, tt.shellOutput)
+					return 0, err
+				},
+			}
+			code := Main(context.Background(), ioEnv, tt.args...)
+			if code != 0 || stderr.Len() != 0 || stdout.String() != tt.output || calls != 1 {
+				t.Fatalf("got stdout=%q stderr=%q status=%d calls=%d", stdout.String(), stderr.String(), code, calls)
+			}
+		})
+	}
+}
+
+func TestExecuteCommandFailureIsReported(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Stdin:  bytes.NewBufferString("input\n"),
+		Stdout: &stdout,
+		Stderr: &stderr,
+		ShellRunner: func(context.Context, core.IO, string) (int, error) {
+			return 7, nil
+		},
+	}, "e false")
+	if code != 1 || stdout.Len() != 0 || !bytes.Contains(stderr.Bytes(), []byte("status 7")) {
+		t.Fatalf("failed execute command: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
 }
 
 func TestSubstituteBREAndExtended(t *testing.T) {
@@ -248,6 +308,9 @@ func TestReadFileCommandsAndPatternExecution(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stderr,
 		Dir:    dir,
+		ShellRunner: func(context.Context, core.IO, string) (int, error) {
+			return 0, nil
+		},
 	}, "e")
 	if code != 0 || stderr.Len() != 0 || stdout.String() != "\n" {
 		t.Fatalf("e command = (%q, %q, %d)", stdout.String(), stderr.String(), code)

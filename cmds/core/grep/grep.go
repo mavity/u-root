@@ -32,7 +32,7 @@ type options struct {
 	count, listMatches, listNoMatches, quiet, silent        bool
 	lineNumber, byteOffset, withFilename, noFilename        bool
 	recursive, followLinks, onlyMatching, nullData          bool
-	nullFilename, text, lineBuffered                        bool
+	nullFilename, text, lineBuffered, binaryWithoutMatch    bool
 	maxCount, before, after                                 int
 	color                                                   string
 	include, exclude, excludeDir                            []string
@@ -319,6 +319,27 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, []string, io.Re
 				opts.nullData = true
 			case "--text":
 				opts.text = true
+				opts.binaryWithoutMatch = false
+			case "--binary-files":
+				v, err := value(func() string {
+					if hasValue {
+						return val
+					}
+					return ""
+				}(), &i, name)
+				if err != nil {
+					return opts, nil, nil, stdin, err
+				}
+				switch v {
+				case "text":
+					opts.text, opts.binaryWithoutMatch = true, false
+				case "without-match":
+					opts.text, opts.binaryWithoutMatch = false, true
+				case "binary":
+					opts.text, opts.binaryWithoutMatch = false, false
+				default:
+					return opts, nil, nil, stdin, fmt.Errorf("invalid --binary-files mode %q", v)
+				}
 			case "--line-buffered":
 				opts.lineBuffered = true
 			case "--max-count":
@@ -475,8 +496,9 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, []string, io.Re
 						opts.nullData = true
 					case 'a':
 						opts.text = true
+						opts.binaryWithoutMatch = false
 					case 'I':
-						opts.text = false
+						opts.text, opts.binaryWithoutMatch = false, true
 					default:
 						return opts, nil, nil, stdin, fmt.Errorf("unknown option -%c", flag)
 					}
@@ -608,6 +630,27 @@ func (c *command) scanReader(input io.Reader, name string) error {
 	if input == nil {
 		input = bytes.NewReader(nil)
 	}
+	if c.opts.maxCount == 0 {
+		if c.opts.count {
+			return c.writeCount(name, 0)
+		}
+		if c.opts.listNoMatches {
+			c.found = true
+			return c.writeFileName(name)
+		}
+		return nil
+	}
+	if !c.opts.text {
+		var binary bool
+		var err error
+		input, binary, err = detectBinary(c.ctx, input)
+		if err != nil {
+			return err
+		}
+		if binary {
+			return c.scanBinary(input, name)
+		}
+	}
 	reader := bufio.NewReader(input)
 	delim := byte('\n')
 	if c.opts.nullData {
@@ -623,16 +666,6 @@ func (c *command) scanReader(input io.Reader, name string) error {
 		fileMatched    bool
 		stoppedMatch   bool
 	)
-	if c.opts.maxCount == 0 {
-		if c.opts.count {
-			return c.writeCount(name, 0)
-		}
-		if c.opts.listNoMatches {
-			c.found = true
-			return c.writeFileName(name)
-		}
-		return nil
-	}
 	for {
 		if err := c.checkContext(); err != nil {
 			return err
@@ -725,6 +758,146 @@ func (c *command) scanReader(input io.Reader, name string) error {
 	if c.opts.listNoMatches && !fileMatched {
 		c.found = true
 		return c.writeFileName(name)
+	}
+	return nil
+}
+
+func detectBinary(ctx context.Context, input io.Reader) (io.Reader, bool, error) {
+	if seeker, ok := input.(io.ReadSeeker); ok {
+		position, err := seeker.Seek(0, io.SeekCurrent)
+		if err == nil {
+			var buf [32 * 1024]byte
+			binary := false
+			for {
+				if err := ctx.Err(); err != nil {
+					_, _ = seeker.Seek(position, io.SeekStart)
+					return nil, false, err
+				}
+				n, readErr := seeker.Read(buf[:])
+				if bytes.IndexByte(buf[:n], 0) >= 0 {
+					binary = true
+					break
+				}
+				if readErr != nil {
+					if !errors.Is(readErr, io.EOF) {
+						return nil, false, readErr
+					}
+					break
+				}
+				if n == 0 {
+					return nil, false, io.ErrNoProgress
+				}
+			}
+			if _, err := seeker.Seek(position, io.SeekStart); err != nil {
+				return nil, false, err
+			}
+			return input, binary, nil
+		}
+	}
+	var data bytes.Buffer
+	var buf [32 * 1024]byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		n, readErr := input.Read(buf[:])
+		if n > 0 {
+			if _, err := data.Write(buf[:n]); err != nil {
+				return nil, false, err
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return nil, false, readErr
+			}
+			break
+		}
+		if n == 0 {
+			return nil, false, io.ErrNoProgress
+		}
+	}
+	result := data.Bytes()
+	return bytes.NewReader(result), bytes.IndexByte(result, 0) >= 0, nil
+}
+
+func (c *command) scanBinary(input io.Reader, name string) error {
+	if c.opts.maxCount == 0 {
+		if c.opts.count {
+			return c.writeCount(name, 0)
+		}
+		if c.opts.listNoMatches {
+			c.found = true
+			return c.writeFileName(name)
+		}
+		return nil
+	}
+	if c.opts.binaryWithoutMatch {
+		if c.opts.count {
+			return c.writeCount(name, 0)
+		}
+		if c.opts.listNoMatches {
+			c.found = true
+			return c.writeFileName(name)
+		}
+		return nil
+	}
+	reader := bufio.NewReader(input)
+	delim := byte('\n')
+	if c.opts.nullData {
+		delim = 0
+	}
+	selected := 0
+	for {
+		if err := c.checkContext(); err != nil {
+			return err
+		}
+		record, err := reader.ReadBytes(delim)
+		if len(record) == 0 && errors.Is(err, io.EOF) {
+			break
+		}
+		if len(record) > 0 && record[len(record)-1] == delim {
+			record = record[:len(record)-1]
+		}
+		matches := c.matcher.FindAllIndex(record, 0)
+		match := len(matches) > 0
+		if c.opts.invert {
+			match = !match
+		}
+		if match {
+			selected++
+			if c.opts.maxCount > 0 && selected >= c.opts.maxCount {
+				break
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				return err
+			}
+			break
+		}
+	}
+	if c.opts.count {
+		if err := c.writeCount(name, selected); err != nil {
+			return err
+		}
+	}
+	if selected == 0 {
+		if c.opts.listNoMatches {
+			c.found = true
+			return c.writeFileName(name)
+		}
+		return nil
+	}
+	c.found = true
+	if c.opts.quiet {
+		return errStop
+	}
+	if c.opts.listMatches {
+		return c.writeFileName(name)
+	}
+	if !c.opts.count {
+		_, err := fmt.Fprintf(c.stdout, "Binary file %s matches\n", name)
+		return err
 	}
 	return nil
 }

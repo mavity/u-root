@@ -8,9 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"unicode"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -818,24 +816,25 @@ func (s *execState) runExternal(command string, print bool) ([]byte, error) {
 	if command == "" {
 		command = string(s.pattern)
 	}
-	shell, args := "sh", []string{"-c", command}
-	if runtime.GOOS == "windows" {
-		shell, args = "cmd.exe", []string{"/C", command}
+	if s.ioEnv.ShellRunner == nil {
+		return nil, errors.New("shell command execution is unavailable")
 	}
-	cmd := exec.CommandContext(s.ctx, shell, args...)
-	cmd.Dir = s.dir
-	cmd.Stdin = bytes.NewReader(nil)
-	if s.ioEnv.Environ != nil {
-		cmd.Env = s.ioEnv.Environ()
-	}
-	output, err := cmd.Output()
+	var output bytes.Buffer
+	ioEnv := s.ioEnv
+	ioEnv.Dir = s.dir
+	ioEnv.Stdin = bytes.NewReader(nil)
+	ioEnv.Stdout = &output
+	status, err := ioEnv.ShellRunner(s.ctx, ioEnv, command)
 	if err != nil {
 		return nil, err
 	}
-	if print {
-		_, err = s.out.Write(output)
+	if status != 0 {
+		return nil, fmt.Errorf("command exited with status %d", status)
 	}
-	return output, err
+	if print {
+		_, err = s.out.Write(output.Bytes())
+	}
+	return output.Bytes(), err
 }
 
 func (s *execState) resolvePath(name string) string {

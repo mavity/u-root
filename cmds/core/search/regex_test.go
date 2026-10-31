@@ -51,6 +51,29 @@ func TestPerlBackreference(t *testing.T) {
 	}
 }
 
+func TestPerlLookaround(t *testing.T) {
+	tests := []struct {
+		pattern string
+		input   string
+		want    [][]int
+	}{
+		{`(?=needle)needle`, "needle xneedle", [][]int{{0, 6}, {8, 14}}},
+		{`(?!bad)(?:bad|good)`, "bad good", [][]int{{4, 8}}},
+		{`(?<=prefix)needle`, "prefixneedle xneedle", [][]int{{6, 12}}},
+		{`(?<!prefix)needle`, "prefixneedle xneedle", [][]int{{14, 20}}},
+	}
+	for _, tt := range tests {
+		m, err := Compile([]string{tt.pattern}, Options{Perl: true})
+		if err != nil {
+			t.Fatalf("Compile(%q): %v", tt.pattern, err)
+		}
+		got := m.FindAllIndex([]byte(tt.input), 0)
+		if !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("FindAllIndex(%q, %q) = %v, want %v", tt.pattern, tt.input, got, tt.want)
+		}
+	}
+}
+
 func TestFindAllIndexOrdersAndDeduplicatesPatterns(t *testing.T) {
 	m, err := Compile([]string{"cat", "dog", "cat"}, Options{Fixed: true})
 	if err != nil {

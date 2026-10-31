@@ -6,6 +6,7 @@ package rg
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"os"
@@ -20,7 +21,8 @@ func run(t *testing.T, dir, input string, args ...string) (int, string, string) 
 	t.Helper()
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), core.IO{
-		Dir: dir, Stdin: strings.NewReader(input), Stdout: &stdout, Stderr: &stderr,
+		Dir: dir, Stdin: strings.NewReader(input), StdinIsTerminal: input == "",
+		Stdout: &stdout, Stderr: &stderr,
 	}, args...)
 	return code, stdout.String(), stderr.String()
 }
@@ -64,7 +66,7 @@ func TestRecursiveSearchHonorsHiddenIgnoreAndGlob(t *testing.T) {
 	if code != 0 || stderr != "" {
 		t.Fatalf("search: code=%d stderr=%q", code, stderr)
 	}
-	if !strings.Contains(stdout, "ignored.go:1:needle") || strings.Contains(stdout, ".hidden.go") || !strings.Contains(stdout, "visible.go:1:needle") || !strings.Contains(stdout, "nested\\other.go:1:needle") {
+	if !strings.Contains(stdout, "ignored.go:1:needle") || strings.Contains(stdout, ".hidden.go") || !strings.Contains(stdout, "visible.go:1:needle") || !strings.Contains(stdout, "nested/other.go:1:needle") {
 		t.Fatalf("unexpected recursive output: %q", stdout)
 	}
 
@@ -75,6 +77,97 @@ func TestRecursiveSearchHonorsHiddenIgnoreAndGlob(t *testing.T) {
 	code, stdout, stderr = run(t, dir, "", "-g", "!*.txt", "needle")
 	if code != 0 || stderr != "" || strings.Contains(stdout, "excluded.txt") || !strings.Contains(stdout, "ignored.go") {
 		t.Fatalf("negated glob: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestCompressedMultilineStatsAndCaseInsensitiveGlobs(t *testing.T) {
+	dir := t.TempDir()
+	compressed, err := os.Create(filepath.Join(dir, "packed.txt.gz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gz := gzip.NewWriter(compressed)
+	if _, err := gz.Write([]byte("needle in gzip\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "multiline.txt"), []byte("first\nsecond\nlast\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "visible.go"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	code, stdout, stderr := run(t, dir, "", "-z", "needle", "packed.txt.gz")
+	if code != 0 || stderr != "" || stdout != "packed.txt.gz:1:needle in gzip\n" {
+		t.Fatalf("compressed search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = run(t, dir, "", "-U", "first\nsecond", "multiline.txt")
+	if code != 0 || stderr != "" || stdout != "multiline.txt:1:first\nmultiline.txt:2:second\n" {
+		t.Fatalf("multiline search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = run(t, dir, "first\nsecond\n", "-U", "first\nsecond")
+	if code != 0 || stderr != "" || stdout != "1:first\n2:second\n" {
+		t.Fatalf("multiline stdin search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = run(t, dir, "", "--glob-case-insensitive", "-g", "*.GO", "needle")
+	if code != 0 || stderr != "" || stdout != "visible.go:1:needle\n" {
+		t.Fatalf("case-insensitive glob: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+
+	code, stdout, stderr = run(t, dir, "", "--stats", "needle", "visible.go")
+	if code != 0 || stdout != "visible.go:1:needle\n" ||
+		!strings.Contains(stderr, "1 matches\n") ||
+		!strings.Contains(stderr, "1 files searched\n") {
+		t.Fatalf("stats: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestGlobalAndGitInfoExcludeRules(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	gitInfo := filepath.Join(dir, ".git", "info")
+	if err := os.MkdirAll(gitInfo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	globalExclude := filepath.Join(home, "global.ignore")
+	if err := os.WriteFile(globalExclude, []byte("global.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte("[core]\n\texcludesfile = "+globalExclude+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitInfo, "exclude"), []byte("info.txt\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"global.txt": "needle\n",
+		"info.txt":   "needle\n",
+		"kept.txt":   "needle\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var stdout, stderr bytes.Buffer
+	code := Main(context.Background(), core.IO{
+		Dir: dir, Stdout: &stdout, Stderr: &stderr,
+		LookupEnv: func(key string) (string, bool) {
+			if key == "HOME" {
+				return home, true
+			}
+			return "", false
+		},
+	}, "needle", ".")
+	if code != 0 || stderr.Len() != 0 || stdout.String() != "kept.txt:1:needle\n" {
+		t.Fatalf("global excludes: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
 
@@ -100,6 +193,17 @@ func TestJSONOutputIsStructured(t *testing.T) {
 	}
 	if strings.Join(types, ",") != "begin,match,end" {
 		t.Fatalf("event types = %v, want begin,match,end", types)
+	}
+}
+
+func TestPerlLookaroundSearch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle badneedle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := run(t, dir, "", "-P", `(?<!bad)needle`, "a.txt")
+	if code != 0 || stderr != "" || stdout != "a.txt:1:needle badneedle\n" {
+		t.Fatalf("lookbehind search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
 
