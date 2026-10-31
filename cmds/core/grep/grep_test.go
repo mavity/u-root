@@ -384,6 +384,7 @@ func TestGrepFilesAndRecursive(t *testing.T) {
 		if code != 0 || out.String() != "target in root\n" {
 			t.Fatalf("single file failed: code=%d out=%q err=%s", code, out.String(), errOut.String())
 		}
+
 	}
 
 	// Recursive -r
@@ -394,6 +395,7 @@ func TestGrepFilesAndRecursive(t *testing.T) {
 		if code != 0 || !strings.Contains(out.String(), "target in root") || !strings.Contains(out.String(), "target in sub") {
 			t.Fatalf("recursive -r failed: code=%d out=%q err=%s", code, out.String(), errOut.String())
 		}
+
 	}
 
 	// -l: list files with matches
@@ -407,3 +409,51 @@ func TestGrepFilesAndRecursive(t *testing.T) {
 	}
 }
 
+func TestGrepLongRecordsPatternsContextAndMaxCount(t *testing.T) {
+	dir := t.TempDir()
+	record := strings.Repeat("x", 128*1024) + "needle\n"
+	if err := os.WriteFile(filepath.Join(dir, "long.txt"), []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Dir: dir, Stdout: &out, Stderr: &errOut}
+	if code := Main(context.Background(), ioEnv, "needle", "long.txt"); code != 0 || errOut.Len() != 0 || out.String() != record {
+		t.Fatalf("long record: code=%d output length=%d stderr=%q", code, out.Len(), errOut.String())
+	}
+
+	input := "apple\nbefore\nneedle one\nafter\ngap\npear\n"
+	out.Reset()
+	errOut.Reset()
+	ioEnv.Stdin = strings.NewReader(input)
+	if code := Main(context.Background(), ioEnv, "-e", "apple", "-e", "pear"); code != 0 || out.String() != "apple\npear\n" {
+		t.Fatalf("repeated patterns: code=%d stdout=%q stderr=%s", code, out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	ioEnv.Stdin = strings.NewReader(input)
+	if code := Main(context.Background(), ioEnv, "-C", "1", "needle"); code != 0 || out.String() != "before\nneedle one\nafter\n" {
+		t.Fatalf("context: code=%d stdout=%q stderr=%s", code, out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	ioEnv.Stdin = strings.NewReader(input)
+	if code := Main(context.Background(), ioEnv, "-c", "-m", "0", "needle"); code != 1 || out.String() != "0\n" {
+		t.Fatalf("zero max-count: code=%d stdout=%q stderr=%s", code, out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := Main(context.Background(), ioEnv, "-H", "-c", "-m", "1", "needle", "long.txt"); code != 0 || out.String() != "long.txt:1\n" {
+		t.Fatalf("max-count with count: code=%d stdout=%q stderr=%s", code, out.String(), errOut.String())
+	}
+}
+
+func TestGrepSilentDoesNotSuppressMatches(t *testing.T) {
+	var out, errOut bytes.Buffer
+	ioEnv := core.IO{Stdin: strings.NewReader("found\n"), Stdout: &out, Stderr: &errOut}
+	if code := Main(context.Background(), ioEnv, "-s", "found"); code != 0 || out.String() != "found\n" {
+		t.Fatalf("-s must not imply quiet mode: code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
