@@ -640,7 +640,7 @@ func (c *command) scanReader(input io.Reader, name string) error {
 		}
 		return nil
 	}
-	if !c.opts.text {
+	if !c.opts.text && !c.opts.nullData {
 		var binary bool
 		var err error
 		input, binary, err = detectBinary(c.ctx, input)
@@ -914,7 +914,7 @@ func (c *command) writeCount(name string, count int) error {
 	if _, err := c.stdout.WriteString(strconv.Itoa(count)); err != nil {
 		return err
 	}
-	if err := c.stdout.WriteByte('\n'); err != nil {
+	if err := c.stdout.WriteByte(recordDelimiter(c.opts.nullData)); err != nil {
 		return err
 	}
 	if c.opts.lineBuffered {
@@ -925,7 +925,7 @@ func (c *command) writeCount(name string, count int) error {
 
 func (c *command) emit(name string, rec record, match bool, matches [][]int, lastOutputLine *int64) error {
 	if (c.opts.before > 0 || c.opts.after > 0) && *lastOutputLine != 0 && rec.line > *lastOutputLine+1 {
-		if _, err := c.stdout.WriteString("--\n"); err != nil {
+		if _, err := c.stdout.Write([]byte{'-', '-', recordDelimiter(c.opts.nullData)}); err != nil {
 			return err
 		}
 	}
@@ -983,7 +983,7 @@ func (c *command) emit(name string, rec record, match bool, matches [][]int, las
 					return err
 				}
 			}
-			if err := c.stdout.WriteByte('\n'); err != nil {
+			if err := c.stdout.WriteByte(recordDelimiter(c.opts.nullData)); err != nil {
 				return err
 			}
 		}
@@ -998,7 +998,7 @@ func (c *command) emit(name string, rec record, match bool, matches [][]int, las
 		} else if _, err := c.stdout.Write(rec.data); err != nil {
 			return err
 		}
-		if err := c.stdout.WriteByte('\n'); err != nil {
+		if err := c.stdout.WriteByte(recordDelimiter(c.opts.nullData)); err != nil {
 			return err
 		}
 	}
@@ -1033,10 +1033,18 @@ func (c *command) writeHighlighted(data []byte, matches [][]int) error {
 	return err
 }
 
+func recordDelimiter(nullData bool) byte {
+	if nullData {
+		return 0
+	}
+	return '\n'
+}
+
 func (c *command) writeFileName(name string) error {
 	if _, err := c.stdout.WriteString(name); err != nil {
 		return err
 	}
+
 	delim := byte('\n')
 	if c.opts.nullFilename {
 		delim = 0

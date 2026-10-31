@@ -22,7 +22,14 @@ func run(t *testing.T, dir, input string, args ...string) (int, string, string) 
 	var stdout, stderr bytes.Buffer
 	code := Main(context.Background(), core.IO{
 		Dir: dir, Stdin: strings.NewReader(input), StdinIsTerminal: input == "",
-		Stdout: &stdout, Stderr: &stderr,
+		StdoutIsTerminal: true,
+		Stdout:           &stdout, Stderr: &stderr,
+		LookupEnv: func(key string) (string, bool) {
+			if key == "NO_COLOR" {
+				return "1", true
+			}
+			return "", false
+		},
 	}, args...)
 	return code, stdout.String(), stderr.String()
 }
@@ -35,6 +42,10 @@ func TestMainFileSearchOutputAndStatus(t *testing.T) {
 	code, stdout, stderr := run(t, dir, "", "-F", "needle", "sample.txt")
 	if code != 0 || stderr != "" || stdout != "sample.txt:1:needle\n" {
 		t.Fatalf("got code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	code, stdout, stderr = run(t, dir, "", "-n", "-F", "needle", "sample.txt")
+	if code != 0 || stderr != "" || stdout != "sample.txt:1:needle\n" {
+		t.Fatalf("explicit line number: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 	code, stdout, stderr = run(t, dir, "", "absent", "sample.txt")
 	if code != 1 || stdout != "" || stderr != "" {
@@ -116,6 +127,10 @@ func TestCompressedMultilineStatsAndCaseInsensitiveGlobs(t *testing.T) {
 	if code != 0 || stderr != "" || stdout != "1:first\n2:second\n" {
 		t.Fatalf("multiline stdin search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
+	code, stdout, stderr = run(t, dir, "first\nsecond\n", "-U", "-n", "first\nsecond")
+	if code != 0 || stderr != "" || stdout != "1:first\n2:second\n" {
+		t.Fatalf("numbered multiline stdin search: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
 
 	code, stdout, stderr = run(t, dir, "", "--glob-case-insensitive", "-g", "*.GO", "needle")
 	if code != 0 || stderr != "" || stdout != "visible.go:1:needle\n" {
@@ -123,9 +138,11 @@ func TestCompressedMultilineStatsAndCaseInsensitiveGlobs(t *testing.T) {
 	}
 
 	code, stdout, stderr = run(t, dir, "", "--stats", "needle", "visible.go")
-	if code != 0 || stdout != "visible.go:1:needle\n" ||
-		!strings.Contains(stderr, "1 matches\n") ||
-		!strings.Contains(stderr, "1 files searched\n") {
+	if code != 0 || stderr != "" ||
+		!strings.Contains(stdout, "visible.go:1:needle\n\n1 matches\n") ||
+		!strings.Contains(stdout, "1 files searched\n") ||
+		!strings.Contains(stdout, "bytes printed\n") ||
+		!strings.Contains(stdout, "bytes searched\n") {
 		t.Fatalf("stats: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
 }
@@ -166,7 +183,7 @@ func TestGlobalAndGitInfoExcludeRules(t *testing.T) {
 			return "", false
 		},
 	}, "needle", ".")
-	if code != 0 || stderr.Len() != 0 || stdout.String() != "kept.txt:1:needle\n" {
+	if code != 0 || stderr.Len() != 0 || stdout.String() != "kept.txt:needle\n" {
 		t.Fatalf("global excludes: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 }
@@ -191,8 +208,8 @@ func TestJSONOutputIsStructured(t *testing.T) {
 		}
 		types = append(types, event.Type)
 	}
-	if strings.Join(types, ",") != "begin,match,end" {
-		t.Fatalf("event types = %v, want begin,match,end", types)
+	if strings.Join(types, ",") != "begin,match,end,summary" {
+		t.Fatalf("event types = %v, want begin,match,end,summary", types)
 	}
 }
 

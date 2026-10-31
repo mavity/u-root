@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/klauspost/compress/zstd"
@@ -37,7 +38,7 @@ type options struct {
 	fixed, ignoreCase, invert, word, wholeLine, perl                        bool
 	hidden, noIgnore, text, follow, nullData, multiline, searchZip          bool
 	globCaseInsensitive, stats                                              bool
-	lineNumber, column, withFilename, noFilename                            bool
+	lineNumber, lineNumberExplicit, column, withFilename, noFilename        bool
 	count, countMatches, files, filesWithMatches, filesWithoutMatch         bool
 	onlyMatching, quiet, json, noHeading, typeList, nullFilename, smartCase bool
 	color, sort, contextSeparator                                           string
@@ -55,20 +56,36 @@ type ignoreRule struct {
 }
 
 type command struct {
-	ctx             context.Context
-	ioEnv           core.IO
-	opts            options
-	matcher         *search.Matcher
-	out             *bufio.Writer
-	errOut          io.Writer
-	found, hadError bool
-	color           bool
-	seen            map[string]struct{}
-	stats           searchStats
+	ctx              context.Context
+	ioEnv            core.IO
+	opts             options
+	matcher          *search.Matcher
+	out              *bufio.Writer
+	errOut           io.Writer
+	stdoutCounter    *countingWriter
+	jsonBytesPrinted int64
+	started          time.Time
+	searchElapsed    time.Duration
+	found, hadError  bool
+	multiplePaths    bool
+	color            bool
+	seen             map[string]struct{}
+	stats            searchStats
 }
 
 type searchStats struct {
-	matches, matchedLines, filesWithMatches, filesSearched, bytesSearched int64
+	matches, matchedLines, filesWithMatches, filesSearched, bytesSearched, bytesPrinted int64
+}
+
+type countingWriter struct {
+	writer  io.Writer
+	written int64
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	w.written += int64(n)
+	return n, err
 }
 
 var errStop = errors.New("quiet match")
@@ -102,6 +119,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		fmt.Fprintln(ioEnv.Stderr, "rg: --json cannot be combined with file-listing or count output modes")
 		return 2
 	}
+	stdoutCounter := &countingWriter{writer: ioEnv.Stdout}
 	if !opts.files && !opts.typeList {
 		matcher, err := search.Compile(opts.patterns, search.Options{
 			Fixed: opts.fixed, IgnoreCase: opts.ignoreCase, Perl: opts.perl,
@@ -113,15 +131,23 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		}
 		cmd := &command{
 			ctx: ctx, ioEnv: ioEnv, opts: opts, matcher: matcher,
-			out: bufio.NewWriter(ioEnv.Stdout), errOut: ioEnv.Stderr,
+			out: bufio.NewWriter(stdoutCounter), errOut: ioEnv.Stderr,
+			stdoutCounter: stdoutCounter, started: time.Now(),
 			seen: make(map[string]struct{}),
 		}
 		cmd.color = opts.color == "always" ||
 			(opts.color == "auto" && ioEnv.StdoutIsTerminal && ioEnv.Getenv("NO_COLOR") == "")
-		if err := cmd.run(paths); err != nil && !errors.Is(err, errStop) {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		searchStarted := time.Now()
+		runErr := cmd.run(paths)
+		cmd.searchElapsed = time.Since(searchStarted)
+		if runErr != nil && !errors.Is(runErr, errStop) {
+			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
 				return 130
 			}
+			fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", runErr)
+			return 2
+		}
+		if err := cmd.writeJSONSummary(); err != nil {
 			fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 			return 2
 		}
@@ -132,7 +158,13 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 			fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 			return 2
 		}
-		cmd.writeStats()
+		if err := cmd.writeStats(); err != nil {
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+				return 0
+			}
+			fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
+			return 2
+		}
 		if cmd.hadError {
 			return 2
 		}
@@ -141,7 +173,10 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		}
 		return 1
 	}
-	cmd := &command{ctx: ctx, ioEnv: ioEnv, opts: opts, out: bufio.NewWriter(ioEnv.Stdout), errOut: ioEnv.Stderr}
+	cmd := &command{
+		ctx: ctx, ioEnv: ioEnv, opts: opts, out: bufio.NewWriter(stdoutCounter), errOut: ioEnv.Stderr,
+		stdoutCounter: stdoutCounter, started: time.Now(),
+	}
 	if opts.typeList {
 		names := make([]string, 0, len(opts.typeDefs))
 		for name := range opts.typeDefs {
@@ -154,7 +189,14 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		_ = cmd.out.Flush()
 		return 0
 	}
-	if err := cmd.run(paths); err != nil {
+	searchStarted := time.Now()
+	runErr := cmd.run(paths)
+	cmd.searchElapsed = time.Since(searchStarted)
+	if runErr != nil {
+		fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", runErr)
+		return 2
+	}
+	if err := cmd.writeJSONSummary(); err != nil {
 		fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 		return 2
 	}
@@ -162,7 +204,13 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) int {
 		fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
 		return 2
 	}
-	cmd.writeStats()
+	if err := cmd.writeStats(); err != nil {
+		if errors.Is(err, os.ErrClosed) || errors.Is(err, io.ErrClosedPipe) {
+			return 0
+		}
+		fmt.Fprintf(ioEnv.Stderr, "rg: %v\n", err)
+		return 2
+	}
 	if cmd.hadError {
 		return 2
 	}
@@ -180,7 +228,7 @@ var errHelp = errors.New("help requested")
 
 func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 	opts := options{
-		lineNumber: true, color: "auto", sort: "path", contextSeparator: "--",
+		color: "auto", sort: "path", contextSeparator: "--",
 		maxCount: -1, maxDepth: -1, typeDefs: cloneTypes(),
 	}
 	var paths []string
@@ -250,9 +298,9 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 			case "--follow":
 				opts.follow = true
 			case "--line-number":
-				opts.lineNumber = true
+				opts.lineNumber, opts.lineNumberExplicit = true, true
 			case "--no-line-number":
-				opts.lineNumber = false
+				opts.lineNumber, opts.lineNumberExplicit = false, true
 			case "--column":
 				opts.column = true
 			case "--with-filename":
@@ -479,9 +527,9 @@ func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 					case 'x':
 						opts.wholeLine = true
 					case 'n':
-						opts.lineNumber = true
+						opts.lineNumber, opts.lineNumberExplicit = true, true
 					case 'N':
-						opts.lineNumber = false
+						opts.lineNumber, opts.lineNumberExplicit = false, true
 					case 'H':
 						opts.withFilename, opts.noFilename = true, false
 					case 'h':
@@ -577,6 +625,7 @@ func parseSize(s string) (int64, error) {
 }
 
 func (c *command) run(paths []string) error {
+	c.multiplePaths = len(paths) > 1
 	if len(paths) == 1 && paths[0] == "-" {
 		return c.searchReader(c.ioEnv.Stdin, "(standard input)", false)
 	}
@@ -722,9 +771,13 @@ func (c *command) searchPath(path, display string, inherited []ignoreRule, depth
 		if closeReader != nil {
 			defer closeReader.Close()
 		}
-		return c.searchReader(reader, display, true)
+		return c.searchReader(reader, display, c.filenameByDefault(fromWalk))
 	}
-	return c.searchReader(file, display, true)
+	return c.searchReader(file, display, c.filenameByDefault(fromWalk))
+}
+
+func (c *command) filenameByDefault(fromWalk bool) bool {
+	return c.opts.withFilename || c.multiplePaths || fromWalk || c.ioEnv.StdoutIsTerminal
 }
 
 func (c *command) wasSeen(path string) bool {
@@ -747,6 +800,8 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 	if c.opts.multiline {
 		return c.searchMultiline(reader, name, named)
 	}
+	fileStarted := time.Now()
+	printedBefore := c.jsonBytesPrinted
 	var offset int64
 	var selected, totalMatches int
 	matchedFile := false
@@ -789,10 +844,7 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 			return err
 		}
 		if c.opts.json && !c.opts.quiet {
-			return c.jsonEvent("end", map[string]any{
-				"path": jsonPath(name), "binary_offset": nil,
-				"stats": map[string]int{"matches": 0, "searches": 1, "searches_with_match": 0, "bytes_searched": 0},
-			})
+			return c.jsonEnd(name, nil, fileStarted, printedBefore, 0, 0, 0)
 		}
 		return nil
 	}
@@ -819,7 +871,6 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 		terminated := false
 		if len(data) > 0 && data[len(data)-1] == delim {
 			data = data[:len(data)-1]
-			offset++
 			terminated = true
 		}
 		item := line{data: append([]byte(nil), data...), number: lineNumber, offset: lineOffset, terminated: terminated}
@@ -924,16 +975,14 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 		}
 	}
 	if c.opts.json && !c.opts.quiet {
-		return c.jsonEvent("end", map[string]any{
-			"path":          jsonPath(name),
-			"binary_offset": nil,
-			"stats":         map[string]int{"matches": totalMatches, "searches": 1, "searches_with_match": boolInt(selected > 0), "bytes_searched": int(offset)},
-		})
+		return c.jsonEnd(name, nil, fileStarted, printedBefore, totalMatches, selected, offset)
 	}
 	return nil
 }
 
 func (c *command) searchMultiline(reader io.Reader, name string, named bool) error {
+	fileStarted := time.Now()
+	printedBefore := c.jsonBytesPrinted
 	c.stats.filesSearched++
 	if c.opts.json && !c.opts.quiet {
 		if err := c.jsonEvent("begin", map[string]any{"path": jsonPath(name)}); err != nil {
@@ -959,10 +1008,7 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 			return c.writeFileName(name)
 		}
 		if c.opts.json && !c.opts.quiet {
-			return c.jsonEvent("end", map[string]any{
-				"path": jsonPath(name), "binary_offset": nil,
-				"stats": map[string]int{"matches": 0, "searches": 1, "searches_with_match": 0, "bytes_searched": 0},
-			})
+			return c.jsonEnd(name, nil, fileStarted, printedBefore, 0, 0, 0)
 		}
 		return nil
 	}
@@ -973,10 +1019,7 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 	c.stats.bytesSearched += int64(len(data))
 	if !c.opts.text && bytes.IndexByte(data, 0) >= 0 {
 		if c.opts.json && !c.opts.quiet {
-			return c.jsonEvent("end", map[string]any{
-				"path": jsonPath(name), "binary_offset": bytes.IndexByte(data, 0),
-				"stats": map[string]int{"matches": 0, "searches": 1, "searches_with_match": 0, "bytes_searched": 0},
-			})
+			return c.jsonEnd(name, bytes.IndexByte(data, 0), fileStarted, printedBefore, 0, 0, int64(len(data)))
 		}
 		return nil
 	}
@@ -1115,13 +1158,7 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 		return c.writeFileName(name)
 	}
 	if c.opts.json && !c.opts.quiet {
-		return c.jsonEvent("end", map[string]any{
-			"path": jsonPath(name), "binary_offset": nil,
-			"stats": map[string]int{
-				"matches": totalMatches, "searches": 1,
-				"searches_with_match": boolInt(selected > 0), "bytes_searched": len(data),
-			},
-		})
+		return c.jsonEnd(name, nil, fileStarted, printedBefore, totalMatches, selected, int64(len(data)))
 	}
 	return nil
 }
@@ -1177,7 +1214,9 @@ func (c *command) emit(name string, item line, matched bool, matches [][]int, na
 			prefix += name + sep
 		}
 	}
-	if c.opts.lineNumber {
+	showLineNumber := c.opts.lineNumber ||
+		(!c.opts.lineNumberExplicit && c.ioEnv.StdoutIsTerminal)
+	if showLineNumber {
 		prefix += strconv.Itoa(item.number) + sep
 	}
 	if c.opts.column && matched && len(matches) > 0 {
@@ -1674,15 +1713,79 @@ func (c *command) jsonLine(name string, item line, spans [][]int, matched bool) 
 }
 
 func (c *command) jsonEvent(eventType string, data map[string]any) error {
-	return json.NewEncoder(c.out).Encode(map[string]any{"type": eventType, "data": data})
+	encoded, err := json.Marshal(map[string]any{"type": eventType, "data": data})
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	n, err := c.out.Write(encoded)
+	if eventType == "begin" || eventType == "match" {
+		c.jsonBytesPrinted += int64(n)
+	}
+	return err
 }
 
-func (c *command) writeStats() {
-	if !c.opts.stats {
-		return
+func (c *command) bytesPrinted() int64 {
+	return c.stdoutCounter.written + int64(c.out.Buffered())
+}
+
+func elapsedJSON(d time.Duration) map[string]any {
+	if d < 0 {
+		d = 0
 	}
-	fmt.Fprintf(c.errOut, "%d matches\n%d matched lines\n%d files contained matches\n%d files searched\n%d bytes searched\n",
-		c.stats.matches, c.stats.matchedLines, c.stats.filesWithMatches, c.stats.filesSearched, c.stats.bytesSearched)
+	return map[string]any{
+		"secs":  int64(d / time.Second),
+		"nanos": int64(d % time.Second),
+		"human": fmt.Sprintf("%.6fs", d.Seconds()),
+	}
+}
+
+func (c *command) jsonEnd(name string, binaryOffset any, started time.Time, printedBefore int64, matches, matchedLines int, bytesSearched int64) error {
+	stats := map[string]any{
+		"elapsed":             elapsedJSON(time.Since(started)),
+		"searches":            1,
+		"searches_with_match": boolInt(matchedLines > 0),
+		"bytes_searched":      bytesSearched,
+		"bytes_printed":       c.jsonBytesPrinted - printedBefore,
+		"matched_lines":       matchedLines,
+		"matches":             matches,
+	}
+	return c.jsonEvent("end", map[string]any{
+		"path": jsonPath(name), "binary_offset": binaryOffset, "stats": stats,
+	})
+}
+
+func (c *command) writeJSONSummary() error {
+	if !c.opts.json || c.opts.quiet {
+		return nil
+	}
+	c.stats.bytesPrinted = c.jsonBytesPrinted
+	stats := map[string]any{
+		"elapsed":             elapsedJSON(c.searchElapsed),
+		"searches":            c.stats.filesSearched,
+		"searches_with_match": c.stats.filesWithMatches,
+		"bytes_searched":      c.stats.bytesSearched,
+		"bytes_printed":       c.stats.bytesPrinted,
+		"matched_lines":       c.stats.matchedLines,
+		"matches":             c.stats.matches,
+	}
+	return c.jsonEvent("summary", map[string]any{
+		"elapsed_total": elapsedJSON(time.Since(c.started)),
+		"stats":         stats,
+	})
+}
+
+func (c *command) writeStats() error {
+	if !c.opts.stats || c.opts.json {
+		return nil
+	}
+	searchElapsed := c.searchElapsed.Seconds()
+	totalElapsed := time.Since(c.started).Seconds()
+	_, err := fmt.Fprintf(c.ioEnv.Stdout,
+		"\n%d matches\n%d matched lines\n%d files contained matches\n%d files searched\n%d bytes printed\n%d bytes searched\n%.6f seconds spent searching\n%.6f seconds total\n",
+		c.stats.matches, c.stats.matchedLines, c.stats.filesWithMatches, c.stats.filesSearched,
+		c.stdoutCounter.written, c.stats.bytesSearched, searchElapsed, totalElapsed)
+	return err
 }
 
 func boolInt(v bool) int {
