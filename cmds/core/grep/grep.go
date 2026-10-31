@@ -591,6 +591,9 @@ func (c *command) searchPath(path, display string, fromWalk bool) error {
 		}
 		for _, entry := range entries {
 			childDisplay := filepath.Join(display, entry.Name())
+			if display == "." {
+				childDisplay = "." + string(os.PathSeparator) + entry.Name()
+			}
 			childPath := filepath.Join(path, entry.Name())
 			childInfo, err := os.Lstat(childPath)
 			if err != nil {
@@ -598,9 +601,6 @@ func (c *command) searchPath(path, display string, fromWalk bool) error {
 				continue
 			}
 			if childInfo.IsDir() && c.matchesAny(c.opts.excludeDir, childDisplay) {
-				continue
-			}
-			if c.shouldSkipFile(childDisplay) {
 				continue
 			}
 			if err := c.searchPath(childPath, childDisplay, true); err != nil {
@@ -713,7 +713,7 @@ func (c *command) scanReader(input io.Reader, name string) error {
 				}
 				return nil
 			}
-			if !c.opts.count {
+			if !c.opts.count && !c.opts.listNoMatches {
 				for _, old := range before {
 					if err := c.emit(name, old, false, nil, &lastOutputLine); err != nil {
 						return err

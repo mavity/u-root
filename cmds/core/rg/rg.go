@@ -68,6 +68,7 @@ type command struct {
 	searchElapsed    time.Duration
 	found, hadError  bool
 	multiplePaths    bool
+	jsonBegun        bool
 	color            bool
 	seen             map[string]struct{}
 	stats            searchStats
@@ -228,7 +229,7 @@ var errHelp = errors.New("help requested")
 
 func parseArgs(args []string, ioEnv core.IO) (options, []string, error) {
 	opts := options{
-		color: "auto", sort: "path", contextSeparator: "--",
+		color: "auto", sort: "none", contextSeparator: "--",
 		maxCount: -1, maxDepth: -1, typeDefs: cloneTypes(),
 	}
 	var paths []string
@@ -800,6 +801,7 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 	if c.opts.multiline {
 		return c.searchMultiline(reader, name, named)
 	}
+	c.jsonBegun = false
 	fileStarted := time.Now()
 	printedBefore := c.jsonBytesPrinted
 	var offset int64
@@ -817,11 +819,6 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 	delim := byte('\n')
 	if c.opts.nullData {
 		delim = 0
-	}
-	if c.opts.json && !c.opts.quiet {
-		if err := c.jsonEvent("begin", map[string]any{"path": jsonPath(name)}); err != nil {
-			return err
-		}
 	}
 	if c.opts.maxCount == 0 {
 		if c.opts.count || c.opts.countMatches {
@@ -842,9 +839,6 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 			_, err := io.WriteString(c.out, name+outputDelimiter(c.opts.nullFilename))
 			c.found = true
 			return err
-		}
-		if c.opts.json && !c.opts.quiet {
-			return c.jsonEnd(name, nil, fileStarted, printedBefore, 0, 0, 0)
 		}
 		return nil
 	}
@@ -905,7 +899,7 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 				c.found = true
 				return e
 			}
-			if c.opts.count || c.opts.countMatches {
+			if c.opts.count || c.opts.countMatches || c.opts.filesWithoutMatch {
 				if c.opts.maxCount >= 0 && selected >= c.opts.maxCount {
 					break
 				}
@@ -974,21 +968,17 @@ func (c *command) searchReader(reader io.Reader, name string, named bool) error 
 			return err
 		}
 	}
-	if c.opts.json && !c.opts.quiet {
+	if c.opts.json && !c.opts.quiet && matchedFile {
 		return c.jsonEnd(name, nil, fileStarted, printedBefore, totalMatches, selected, offset)
 	}
 	return nil
 }
 
 func (c *command) searchMultiline(reader io.Reader, name string, named bool) error {
+	c.jsonBegun = false
 	fileStarted := time.Now()
 	printedBefore := c.jsonBytesPrinted
 	c.stats.filesSearched++
-	if c.opts.json && !c.opts.quiet {
-		if err := c.jsonEvent("begin", map[string]any{"path": jsonPath(name)}); err != nil {
-			return err
-		}
-	}
 	if c.opts.maxCount == 0 {
 		if c.opts.count || c.opts.countMatches {
 			if named && c.showFilename(name) {
@@ -1007,9 +997,6 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 			c.found = true
 			return c.writeFileName(name)
 		}
-		if c.opts.json && !c.opts.quiet {
-			return c.jsonEnd(name, nil, fileStarted, printedBefore, 0, 0, 0)
-		}
 		return nil
 	}
 	data, err := io.ReadAll(reader)
@@ -1018,9 +1005,6 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 	}
 	c.stats.bytesSearched += int64(len(data))
 	if !c.opts.text && bytes.IndexByte(data, 0) >= 0 {
-		if c.opts.json && !c.opts.quiet {
-			return c.jsonEnd(name, bytes.IndexByte(data, 0), fileStarted, printedBefore, 0, 0, int64(len(data)))
-		}
 		return nil
 	}
 
@@ -1090,7 +1074,7 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 				c.stats.filesWithMatches++
 				return c.writeFileName(name)
 			}
-			if !c.opts.count && !c.opts.countMatches {
+			if !c.opts.count && !c.opts.countMatches && !c.opts.filesWithoutMatch {
 				for _, old := range before {
 					if old.number > lastOut {
 						if err := c.emit(name, old, false, nil, named, &lastOut); err != nil {
@@ -1157,7 +1141,7 @@ func (c *command) searchMultiline(reader io.Reader, name string, named bool) err
 		c.found = true
 		return c.writeFileName(name)
 	}
-	if c.opts.json && !c.opts.quiet {
+	if c.opts.json && !c.opts.quiet && matchedFile {
 		return c.jsonEnd(name, nil, fileStarted, printedBefore, totalMatches, selected, int64(len(data)))
 	}
 	return nil
@@ -1196,6 +1180,12 @@ func (c *command) emit(name string, item line, matched bool, matches [][]int, na
 		return nil
 	}
 	if c.opts.json && !c.opts.quiet {
+		if !c.jsonBegun {
+			if err := c.jsonEvent("begin", map[string]any{"path": jsonPath(name)}); err != nil {
+				return err
+			}
+			c.jsonBegun = true
+		}
 		if err := c.jsonLine(name, item, matches, matched); err != nil {
 			return err
 		}
@@ -1719,7 +1709,7 @@ func (c *command) jsonEvent(eventType string, data map[string]any) error {
 	}
 	encoded = append(encoded, '\n')
 	n, err := c.out.Write(encoded)
-	if eventType == "begin" || eventType == "match" {
+	if eventType == "begin" || eventType == "match" || eventType == "context" {
 		c.jsonBytesPrinted += int64(n)
 	}
 	return err

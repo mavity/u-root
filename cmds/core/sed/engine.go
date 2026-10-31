@@ -364,8 +364,8 @@ func (s *execState) runCycle(stream *lineStream) error {
 					return err
 				}
 				if next == nil {
-					s.quit = true
-					return nil
+					pc = len(s.program.commands)
+					break
 				}
 				s.pattern = append(s.pattern, s.delim)
 				s.pattern = append(s.pattern, next.data...)

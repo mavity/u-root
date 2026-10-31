@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,7 @@ type invocation struct {
 	normalizeWindowsPaths bool
 	normalizeJSON         bool
 	normalizeStats        bool
+	normalizeOutputOrder  bool
 }
 
 type result struct {
@@ -59,6 +61,114 @@ func TestGNUGrepDifferential(t *testing.T) {
 				"b.txt": []byte("other\nneedle\n"),
 			},
 		},
+		{
+			name:  "multiple-patterns",
+			args:  []string{"-e", "alpha", "-e", "beta"},
+			input: "alpha\nbeta\ngamma\n",
+		},
+		{
+			name:  "pattern-file",
+			args:  []string{"-f", "patterns.txt", "sample.txt"},
+			files: map[string][]byte{"patterns.txt": []byte("alpha\nbeta\n"), "sample.txt": []byte("alpha\nbeta\ngamma\n")},
+		},
+		{
+			name:  "empty-pattern-file",
+			args:  []string{"-f", "patterns.txt", "sample.txt"},
+			files: map[string][]byte{"patterns.txt": nil, "sample.txt": []byte("alpha\nbeta\n")},
+		},
+		{
+			name:  "context",
+			args:  []string{"-C", "1", "needle"},
+			input: "before\nneedle\nafter\nlast\n",
+		},
+		{
+			name:  "max-count",
+			args:  []string{"-m", "1", "needle"},
+			input: "needle\nneedle\nother\n",
+		},
+		{
+			name: "counts-and-listed-files",
+			args: []string{"-c", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{
+				"a.txt": []byte("needle\nneedle\n"),
+				"b.txt": []byte("other\n"),
+			},
+		},
+		{
+			name:  "list-matches",
+			args:  []string{"-l", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("needle\n"), "b.txt": []byte("other\n")},
+		},
+		{
+			name:  "list-without-matches",
+			args:  []string{"-L", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("needle\n"), "b.txt": []byte("other\n")},
+		},
+		{
+			name:  "byte-offset",
+			args:  []string{"-b", "needle"},
+			input: "other\nneedle\n",
+		},
+		{
+			name:  "no-final-newline",
+			args:  []string{"-n", "needle"},
+			input: "other\nneedle",
+		},
+		{
+			name:  "pattern-starting-with-dash",
+			args:  []string{"-e", "-needle"},
+			input: "-needle\nother\n",
+		},
+		{
+			name:  "empty-pattern",
+			args:  []string{"-e", ""},
+			input: "alpha\nbeta\n",
+		},
+		{
+			name:  "extended-word-and-line-selection",
+			args:  []string{"-E", "-w", "-x", "(alpha|beta)"},
+			input: "alpha\nalpha beta\nxalpha\nbeta\n",
+		},
+		{
+			name:  "perl-lookahead",
+			args:  []string{"-P", "(?=needle)needle"},
+			input: "needle\nother\n",
+		},
+		{
+			name:  "perl-lookbehind",
+			args:  []string{"-P", "(?<=prefix)needle"},
+			input: "prefixneedle\nneedle\n",
+		},
+		{
+			name:  "null-filename-separator",
+			args:  []string{"-lZ", "needle", "sample.txt"},
+			files: map[string][]byte{"sample.txt": []byte("needle\n")},
+		},
+		{
+			name:  "binary-without-match",
+			args:  []string{"-I", "needle"},
+			input: "binary\x00needle\n",
+		},
+		{
+			name:  "binary-as-text",
+			args:  []string{"-a", "needle"},
+			input: "binary\x00needle\n",
+		},
+		{
+			name: "recursive-exclude-directory",
+			args: []string{"-r", "--exclude-dir=skip", "needle", "."},
+			files: map[string][]byte{
+				"keep.txt":        []byte("needle\n"),
+				"skip/hidden.txt": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+		},
+		{
+			name:                  "recursive-include-filter",
+			args:                  []string{"-r", "--include=*.txt", "needle", "."},
+			files:                 map[string][]byte{"keep.txt": []byte("needle\n"), "skip.go": []byte("needle\n"), "nested/keep.txt": []byte("needle\n")},
+			normalizeWindowsPaths: true,
+		},
 		{name: "nul-delimited-records", args: []string{"-z", "needle"}, input: "other\x00needle\x00"},
 	}
 	runDifferential(t, "SEARCH_COMPAT_GNU_GREP", "grep", tests, grepMain)
@@ -70,11 +180,41 @@ func TestGNUSedDifferential(t *testing.T) {
 		{name: "line-selection", args: []string{"-n", "2p"}, input: "first\nsecond\nthird\n"},
 		{name: "delete-range", args: []string{"1,2d"}, input: "first\nsecond\nthird\n"},
 		{name: "quit-with-status", args: []string{"-n", "2Q 7"}, input: "first\nsecond\nthird\n"},
+		{name: "extended-backreference", args: []string{"-E", "s/(foo)/[\\1]/g"}, input: "foo food\n"},
+		{name: "address-range", args: []string{"1,/beta/d"}, input: "alpha\ninside\nbeta\nafter\n"},
+		{name: "print-substitution-only", args: []string{"-n", "s/foo/bar/p"}, input: "foo\nother\n"},
+		{name: "transliteration", args: []string{"y/abc/ABC/"}, input: "cab\n"},
+		{name: "multiple-scripts", args: []string{"-e", "s/foo/bar/", "-e", "s/bar/baz/"}, input: "foo\n"},
+		{name: "hold-space", args: []string{"1h; 2G"}, input: "first\nsecond\n"},
+		{name: "multiline-pattern-space", args: []string{"N; s/first\\nsecond/combined/"}, input: "first\nsecond\nthird\n"},
+		{name: "nul-delimited-records", args: []string{"-z", "s/foo/bar/"}, input: "foo\x00other\x00"},
+		{name: "missing-final-newline", args: []string{"s/foo/bar/"}, input: "foo"},
+		{
+			name:  "separate-files-reset-addresses",
+			args:  []string{"-s", "-n", "1p", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("first\nsecond\n"), "b.txt": []byte("third\nfourth\n")},
+		},
+		{
+			name:  "global-address-across-files",
+			args:  []string{"-n", "1p", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("first\nsecond\n"), "b.txt": []byte("third\nfourth\n")},
+		},
+		{
+			name:    "write-command",
+			args:    []string{"-n", "2w output.txt", "sample.txt"},
+			files:   map[string][]byte{"sample.txt": []byte("first\nsecond\nthird\n")},
+			observe: []string{"output.txt"},
+		},
 		{
 			name:    "in-place-backup",
 			args:    []string{"-i.bak", "s/foo/bar/g", "edit.txt"},
 			files:   map[string][]byte{"edit.txt": []byte("foo foo\n")},
 			observe: []string{"edit.txt", "edit.txt.bak"},
+		},
+		{
+			name:  "script-file",
+			args:  []string{"-f", "script.sed", "sample.txt"},
+			files: map[string][]byte{"script.sed": []byte("s/foo/bar/g\n"), "sample.txt": []byte("foo foo\n")},
 		},
 	}
 	runDifferential(t, "SEARCH_COMPAT_GNU_SED", "sed", tests, sedMain)
@@ -98,6 +238,84 @@ func TestRipgrepDifferential(t *testing.T) {
 			files: map[string][]byte{"sample.txt": []byte("other\nneedle\n")},
 		},
 		{
+			name:  "context",
+			args:  []string{"-n", "-C", "1", "needle"},
+			input: "before\nneedle\nafter\nlast\n",
+		},
+		{
+			name:  "count-matching-lines",
+			args:  []string{"--count", "needle", "sample.txt"},
+			files: map[string][]byte{"sample.txt": []byte("needle\nneedle\nother\n")},
+		},
+		{
+			name:  "count-matches",
+			args:  []string{"--count-matches", "a+", "sample.txt"},
+			files: map[string][]byte{"sample.txt": []byte("aa baa\n")},
+		},
+		{
+			name:  "files-with-matches",
+			args:  []string{"-l", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("needle\n"), "b.txt": []byte("other\n")},
+		},
+		{
+			name:  "files-without-match",
+			args:  []string{"--files-without-match", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("needle\n"), "b.txt": []byte("other\n")},
+		},
+		{
+			name:  "max-count",
+			args:  []string{"-m", "1", "-n", "needle"},
+			input: "needle\nneedle\nother\n",
+		},
+		{
+			name:  "pattern-file",
+			args:  []string{"-f", "patterns.txt", "sample.txt"},
+			files: map[string][]byte{"patterns.txt": []byte("alpha\nbeta\n"), "sample.txt": []byte("alpha\nbeta\ngamma\n")},
+		},
+		{
+			name:  "pattern-starting-with-dash",
+			args:  []string{"-e", "-needle"},
+			input: "-needle\nother\n",
+		},
+		{
+			name: "recursive-unrestricted",
+			args: []string{"-uuu", "needle", "."},
+			files: map[string][]byte{
+				".hidden.txt": []byte("needle\n"),
+				".gitignore":  []byte("ignored.txt\n"),
+				"ignored.txt": []byte("needle\n"),
+				"visible.txt": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+			normalizeOutputOrder:  true,
+		},
+		{
+			name: "recursive-max-filesize",
+			args: []string{"--max-filesize", "4", "needle", "."},
+			files: map[string][]byte{
+				"small.txt": []byte("needle\n"),
+				"large.txt": []byte("needle and more\n"),
+			},
+			normalizeWindowsPaths: true,
+		},
+		{
+			name:  "null-filename-separator",
+			args:  []string{"-l", "--null", "needle", "a.txt", "b.txt"},
+			files: map[string][]byte{"a.txt": []byte("needle\n"), "b.txt": []byte("other\n")},
+		},
+		{
+			name: "files-listing",
+			args: []string{"--files", "."},
+			files: map[string][]byte{
+				"a.txt":        []byte("needle\n"),
+				"nested/b.txt": []byte("needle\n"),
+				".hidden.txt":  []byte("needle\n"),
+				".gitignore":   []byte("hidden\n"),
+			},
+			normalizeWindowsPaths: true,
+			normalizeOutputOrder:  true,
+		},
+		{
 			name: "recursive-ignore-and-hidden",
 			args: []string{"needle", "."},
 			files: map[string][]byte{
@@ -110,9 +328,87 @@ func TestRipgrepDifferential(t *testing.T) {
 			normalizeWindowsPaths: true,
 		},
 		{
+			name: "recursive-glob-negation",
+			args: []string{"--sort", "path", "-g", "!ignored.txt", "needle", "."},
+			files: map[string][]byte{
+				"keep.txt":       []byte("needle\n"),
+				"ignored.txt":    []byte("needle\n"),
+				"nested/keep.go": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+		},
+		{
+			name: "recursive-default-order",
+			args: []string{"needle", "."},
+			files: map[string][]byte{
+				"top.txt":          []byte("needle\n"),
+				"nested/second.go": []byte("needle\n"),
+				"nested/first.go":  []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+			normalizeOutputOrder:  true,
+		},
+		{
+			name: "recursive-maxdepth",
+			args: []string{"--maxdepth", "1", "needle", "."},
+			files: map[string][]byte{
+				"top.txt":         []byte("needle\n"),
+				"nested/skip.txt": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+		},
+		{
+			name: "recursive-type",
+			args: []string{"-t", "go", "needle", "."},
+			files: map[string][]byte{
+				"keep.go":     []byte("needle\n"),
+				"skip.txt":    []byte("needle\n"),
+				"nested/x.go": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+			normalizeOutputOrder:  true,
+		},
+		{
+			name: "recursive-excluded-type",
+			args: []string{"--type-not", "go", "needle", "."},
+			files: map[string][]byte{
+				"keep.txt":       []byte("needle\n"),
+				"skip.go":        []byte("needle\n"),
+				"nested/keep.md": []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+			normalizeOutputOrder:  true,
+		},
+		{
+			name: "case-insensitive-glob",
+			args: []string{"--glob-case-insensitive", "-g", "*.TXT", "needle", "."},
+			files: map[string][]byte{
+				"keep.txt": []byte("needle\n"),
+				"skip.go":  []byte("needle\n"),
+			},
+			normalizeWindowsPaths: true,
+		},
+		{
+			name:  "nul-delimited-records",
+			args:  []string{"--null-data", "needle"},
+			input: "other\x00needle\x00",
+		},
+		{
 			name:          "json-events",
 			args:          []string{"--json", "needle", "sample.txt"},
 			files:         map[string][]byte{"sample.txt": []byte("needle\n")},
+			normalizeJSON: true,
+		},
+		{
+			name:          "json-no-match",
+			args:          []string{"--json", "missing", "sample.txt"},
+			files:         map[string][]byte{"sample.txt": []byte("needle\n")},
+			normalizeJSON: true,
+		},
+		{
+			name:          "json-context",
+			args:          []string{"--json", "-C", "1", "needle", "sample.txt"},
+			files:         map[string][]byte{"sample.txt": []byte("before\nneedle\nafter\n")},
 			normalizeJSON: true,
 		},
 		{
@@ -144,6 +440,10 @@ func runDifferential(t *testing.T, envName, defaultCommand string, tests []invoc
 				local.stdout = normalizeWindowsPathOutput(local.stdout)
 				reference.stdout = normalizeWindowsPathOutput(reference.stdout)
 			}
+			if tt.normalizeOutputOrder {
+				local.stdout = normalizeOutputOrder(local.stdout)
+				reference.stdout = normalizeOutputOrder(reference.stdout)
+			}
 			if tt.normalizeJSON {
 				local.stdout = normalizeJSONOutput(t, local.stdout)
 				reference.stdout = normalizeJSONOutput(t, reference.stdout)
@@ -167,9 +467,26 @@ func runDifferential(t *testing.T, envName, defaultCommand string, tests []invoc
 }
 
 func normalizeWindowsPathOutput(output []byte) []byte {
-	value := strings.ReplaceAll(string(output), ".\\", "")
+	value := strings.ReplaceAll(string(output), ".\\", "./")
 	value = strings.ReplaceAll(value, "\\", "/")
+	value = strings.ReplaceAll(value, "./", "")
 	return []byte(value)
+}
+
+func normalizeOutputOrder(output []byte) []byte {
+	if len(output) == 0 {
+		return output
+	}
+	terminated := output[len(output)-1] == '\n'
+	lines := bytes.Split(bytes.TrimSuffix(output, []byte{'\n'}), []byte{'\n'})
+	sort.Slice(lines, func(i, j int) bool {
+		return bytes.Compare(lines[i], lines[j]) < 0
+	})
+	normalized := bytes.Join(lines, []byte{'\n'})
+	if terminated {
+		normalized = append(normalized, '\n')
+	}
+	return normalized
 }
 
 func normalizeJSONOutput(t *testing.T, output []byte) []byte {
@@ -302,7 +619,13 @@ func runReference(t *testing.T, ctx context.Context, command []string, tt invoca
 func makeFixture(t *testing.T, files map[string][]byte) string {
 	t.Helper()
 	dir := t.TempDir()
-	for name, data := range files {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		data := files[name]
 		path := filepath.Join(dir, name)
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
