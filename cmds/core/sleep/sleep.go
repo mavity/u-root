@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -40,8 +41,7 @@ func parseDuration(s string) (time.Duration, error) {
 }
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
-	fs := flag.NewFlagSet("sleep", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
+	fs := newFlagSet(ioEnv.Stderr)
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
 	}
@@ -64,6 +64,17 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+// NewFlagSetForCompletion returns a fresh sleep flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(io.Discard)
+}
+
+func newFlagSet(output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("sleep", flag.ContinueOnError)
+	fs.SetOutput(output)
+	return fs
 }
 
 // Main runs the sleep command reentrantly.

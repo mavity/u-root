@@ -80,14 +80,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	var u bool
-	fs := flag.NewFlagSet("cat", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&u, "u", false, "ignored unbuffered flag")
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: cat [-u] [FILES]...\n\ncat concatenates files and prints them to stdout.\nIf no files are specified, read from stdin.\n\nOptions:\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -152,4 +145,21 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}
 
 	return exitCode
+}
+
+// NewFlagSetForCompletion returns a fresh cat flag definition for shell completion.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(io.Discard)
+}
+
+func newFlagSet(output io.Writer) *flag.FlagSet {
+	var u bool
+	fs := flag.NewFlagSet("cat", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&u, "u", false, "ignored unbuffered flag")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: cat [-u] [FILES]...\n\ncat concatenates files and prints them to stdout.\nIf no files are specified, read from stdin.\n\nOptions:\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }

@@ -194,11 +194,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		separator  string
 		widthEqual bool
 	)
-	fs := flag.NewFlagSet("seq", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.StringVar(&format, "f", "%v", "use printf style floating-point FORMAT")
-	fs.StringVar(&separator, "s", "\n", "use STRING to separate numbers")
-	fs.BoolVar(&widthEqual, "w", false, "equalize width by padding with leading zeroes")
+	fs := newFlagSet(&format, &separator, &widthEqual, ioEnv.Stderr)
 
 	flagArgs := args
 	for i := 0; i < len(args); i++ {
@@ -219,6 +215,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+
 		return 2
 	}
 
@@ -230,4 +227,20 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh seq flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var format, separator string
+	var widthEqual bool
+	return newFlagSet(&format, &separator, &widthEqual, io.Discard)
+}
+
+func newFlagSet(format, separator *string, widthEqual *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("seq", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.StringVar(format, "f", "%v", "use printf style floating-point FORMAT")
+	fs.StringVar(separator, "s", "\n", "use STRING to separate numbers")
+	fs.BoolVar(widthEqual, "w", false, "equalize width by padding with leading zeroes")
+	return fs
 }

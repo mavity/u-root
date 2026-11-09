@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -111,14 +112,7 @@ func mktemp(ioEnv core.IO, f flags) (string, error) {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
-	fs := flag.NewFlagSet("mktemp", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	f.register(fs)
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: mktemp [options] [template]\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&f, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -150,6 +144,22 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 
 	fmt.Fprintf(ioEnv.Stdout, "%s\n", fileName)
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh mktemp flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("mktemp", flag.ContinueOnError)
+	fs.SetOutput(output)
+	f.register(fs)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: mktemp [options] [template]\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the mktemp command reentrantly.

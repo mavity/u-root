@@ -38,9 +38,7 @@ func label(l string, t time.Duration) string {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var posix bool
-	fs := flag.NewFlagSet("time", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&posix, "p", true, "makes time output POSIX.2 compliant")
+	fs := newFlagSet(&posix, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -104,4 +102,17 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh time flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var posix bool
+	return newFlagSet(&posix, io.Discard)
+}
+
+func newFlagSet(posix *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("time", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(posix, "p", true, "makes time output POSIX.2 compliant")
+	return fs
 }

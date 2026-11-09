@@ -367,15 +367,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var del, squeeze, complement bool
-	fs := flag.NewFlagSet("tr", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&del, "delete", false, "delete characters in SET1, do not translate")
-	fs.BoolVar(&del, "d", false, "delete characters in SET1, do not translate (shorthand)")
-	fs.BoolVar(&squeeze, "squeeze-repeats", false, "squeeze repeated characters")
-	fs.BoolVar(&squeeze, "s", false, "squeeze repeated characters (shorthand)")
-	fs.BoolVar(&complement, "complement", false, "complement SET1")
-	fs.BoolVar(&complement, "c", false, "complement SET1 (shorthand)")
-	fs.BoolVar(&complement, "C", false, "complement SET1 (shorthand)")
+	fs := newFlagSet(&del, &squeeze, &complement, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -435,4 +427,23 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh tr flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var del, squeeze, complement bool
+	return newFlagSet(&del, &squeeze, &complement, io.Discard)
+}
+
+func newFlagSet(del, squeeze, complement *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("tr", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(del, "delete", false, "delete characters in SET1, do not translate")
+	fs.BoolVar(del, "d", false, "delete characters in SET1, do not translate (shorthand)")
+	fs.BoolVar(squeeze, "squeeze-repeats", false, "squeeze repeated characters")
+	fs.BoolVar(squeeze, "s", false, "squeeze repeated characters (shorthand)")
+	fs.BoolVar(complement, "complement", false, "complement SET1")
+	fs.BoolVar(complement, "c", false, "complement SET1 (shorthand)")
+	fs.BoolVar(complement, "C", false, "complement SET1 (shorthand)")
+	return fs
 }

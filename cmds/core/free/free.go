@@ -175,16 +175,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("free", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	humanOutput := fs.Bool("h", false, "Human output: show automatically the shortest three-digits unit")
-	inBytes := fs.Bool("b", false, "Express the values in bytes")
-	inKB := fs.Bool("k", false, "Express the values in kibibytes (default)")
-	inMB := fs.Bool("m", false, "Express the values in mebibytes")
-	inGB := fs.Bool("g", false, "Express the values in gibibytes")
-	inTB := fs.Bool("t", false, "Express the values in tebibytes")
-	toJSON := fs.Bool("json", false, "Use JSON for output")
+	fs, humanOutput, inBytes, inKB, inMB, inGB, inTB, toJSON := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -220,4 +211,23 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh free flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	fs, _, _, _, _, _, _, _ := newFlagSet(io.Discard)
+	return fs
+}
+
+func newFlagSet(output io.Writer) (*flag.FlagSet, *bool, *bool, *bool, *bool, *bool, *bool, *bool) {
+	fs := flag.NewFlagSet("free", flag.ContinueOnError)
+	fs.SetOutput(output)
+	humanOutput := fs.Bool("h", false, "Human output: show automatically the shortest three-digits unit")
+	inBytes := fs.Bool("b", false, "Express the values in bytes")
+	inKB := fs.Bool("k", false, "Express the values in kibibytes (default)")
+	inMB := fs.Bool("m", false, "Express the values in mebibytes")
+	inGB := fs.Bool("g", false, "Express the values in gibibytes")
+	inTB := fs.Bool("t", false, "Express the values in tebibytes")
+	toJSON := fs.Bool("json", false, "Use JSON for output")
+	return fs, humanOutput, inBytes, inKB, inMB, inGB, inTB, toJSON
 }

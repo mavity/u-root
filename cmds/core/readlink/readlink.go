@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -59,16 +60,7 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		verbose   bool
 	)
 
-	fs := flag.NewFlagSet("readlink", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&follow, "f", false, "follow recursively")
-	fs.BoolVar(&noNewLine, "n", false, "do not output trailing newline")
-	fs.BoolVar(&verbose, "v", false, "report error messages")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: %s\n", cmd)
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&follow, &noNewLine, &verbose, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -100,6 +92,25 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	}
 
 	return runErr
+}
+
+// NewFlagSetForCompletion returns a fresh readlink flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var follow, noNewLine, verbose bool
+	return newFlagSet(&follow, &noNewLine, &verbose, io.Discard)
+}
+
+func newFlagSet(follow, noNewLine, verbose *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("readlink", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(follow, "f", false, "follow recursively")
+	fs.BoolVar(noNewLine, "n", false, "do not output trailing newline")
+	fs.BoolVar(verbose, "v", false, "report error messages")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: %s\n", cmd)
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the readlink command reentrantly.

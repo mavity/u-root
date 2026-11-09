@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -22,15 +23,7 @@ import (
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var null bool
-	fs := flag.NewFlagSet("printenv", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&null, "0", false, "end each output line with NUL, not newline")
-	fs.BoolVar(&null, "null", false, "end each output line with NUL, not newline")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: printenv [-0] [VARIABLE]...\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&null, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -88,6 +81,24 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		return fmt.Errorf("variable not found")
 	}
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh printenv flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var null bool
+	return newFlagSet(&null, io.Discard)
+}
+
+func newFlagSet(null *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("printenv", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(null, "0", false, "end each output line with NUL, not newline")
+	fs.BoolVar(null, "null", false, "end each output line with NUL, not newline")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: printenv [-0] [VARIABLE]...\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the printenv command reentrantly.

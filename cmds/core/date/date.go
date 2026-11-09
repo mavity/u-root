@@ -214,11 +214,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 
 	var univ bool
 	var ref string
-	fs := flag.NewFlagSet("date", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&univ, "u", false, "Coordinated Universal Time (UTC)")
-	fs.StringVar(&ref, "r", "", "Display the last modification time of FILE")
-	fs.StringVar(&ref, "d", "", "Display the last modification time of FILE")
+	fs := newFlagSet(&univ, &ref, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return 1
@@ -236,4 +232,20 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh date flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var univ bool
+	var ref string
+	return newFlagSet(&univ, &ref, io.Discard)
+}
+
+func newFlagSet(univ *bool, ref *string, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("date", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(univ, "u", false, "Coordinated Universal Time (UTC)")
+	fs.StringVar(ref, "r", "", "Display the last modification time of FILE")
+	fs.StringVar(ref, "d", "", "Display the last modification time of FILE")
+	return fs
 }

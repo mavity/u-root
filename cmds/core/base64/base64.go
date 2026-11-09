@@ -99,9 +99,7 @@ func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 		stderr: stderr,
 	}
 
-	f := flag.NewFlagSet("base64", flag.ContinueOnError)
-	f.SetOutput(stderr)
-	f.BoolVar(&c.decode, "d", false, "decode or encode the file")
+	f := newFlagSet(&c, stderr)
 
 	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -141,6 +139,18 @@ func runWithCtx(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, 
 		return decodeone(ctx, c.stdin, c.stdout)
 	}
 	return encodeone(ctx, c.stdin, c.stdout)
+}
+
+// NewFlagSetForCompletion returns a fresh base64 flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&cmd{}, io.Discard)
+}
+
+func newFlagSet(c *cmd, output io.Writer) *flag.FlagSet {
+	f := flag.NewFlagSet("base64", flag.ContinueOnError)
+	f.SetOutput(output)
+	f.BoolVar(&c.decode, "d", false, "decode or encode the file")
+	return f
 }
 
 func run(stdin io.Reader, stdout, stderr io.Writer, args ...string) error {

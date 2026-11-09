@@ -64,11 +64,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("pidof", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	single := fs.Bool("s", false, "single shot - this instructs the program to only return one pid")
-	quiet := fs.Bool("q", false, "do not display matched PIDs to standard out")
+	fs, single, quiet := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -89,4 +85,18 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh pidof flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	fs, _, _ := newFlagSet(io.Discard)
+	return fs
+}
+
+func newFlagSet(output io.Writer) (*flag.FlagSet, *bool, *bool) {
+	fs := flag.NewFlagSet("pidof", flag.ContinueOnError)
+	fs.SetOutput(output)
+	single := fs.Bool("s", false, "single shot - this instructs the program to only return one pid")
+	quiet := fs.Bool("q", false, "do not display matched PIDs to standard out")
+	return fs, single, quiet
 }

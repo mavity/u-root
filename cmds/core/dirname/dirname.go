@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -20,15 +21,7 @@ var ErrNoArg = errors.New("missing operand")
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var zero bool
-	fs := flag.NewFlagSet("dirname", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&zero, "z", false, "end each output line with NUL, not newline")
-	fs.BoolVar(&zero, "zero", false, "end each output line with NUL, not newline")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: dirname [OPTION] NAME...\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&zero, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -54,6 +47,24 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		fmt.Fprintf(ioEnv.Stdout, "%s%s", filepath.Dir(n), delimiter)
 	}
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh dirname flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var zero bool
+	return newFlagSet(&zero, io.Discard)
+}
+
+func newFlagSet(zero *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("dirname", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(zero, "z", false, "end each output line with NUL, not newline")
+	fs.BoolVar(zero, "zero", false, "end each output line with NUL, not newline")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: dirname [OPTION] NAME...\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the dirname command reentrantly.

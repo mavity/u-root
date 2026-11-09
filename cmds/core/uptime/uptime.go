@@ -94,8 +94,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("uptime", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
+	fs := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -112,4 +111,15 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 
 	fmt.Fprint(ioEnv.Stdout, formatUptime(time.Now(), d, loadAvg))
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh uptime flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(io.Discard)
+}
+
+func newFlagSet(output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("uptime", flag.ContinueOnError)
+	fs.SetOutput(output)
+	return fs
 }

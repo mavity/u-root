@@ -209,10 +209,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var p params
-	fs := flag.NewFlagSet("strings", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.IntVar(&p.n, "n", 4, "the minimum string length")
-	fs.StringVar(&p.t, "t", "", "write each string preceded by its byte offset from the start of the file (d decimal, o octal, x hexadecimal)")
+	fs := newFlagSet(&p, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -229,4 +226,17 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh strings flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&params{}, io.Discard)
+}
+
+func newFlagSet(p *params, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("strings", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.IntVar(&p.n, "n", 4, "the minimum string length")
+	fs.StringVar(&p.t, "t", "", "write each string preceded by its byte offset from the start of the file (d decimal, o octal, x hexadecimal)")
+	return fs
 }

@@ -81,30 +81,7 @@ func validate(p params, args []string) error {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var p params
-	f := flag.NewFlagSet("tar", flag.ContinueOnError)
-	f.SetOutput(ioEnv.Stderr)
-
-	f.BoolVar(&p.create, "create", false, "create a new tar archive from the given directory")
-	f.BoolVar(&p.create, "c", false, "create a new tar archive from the given directory (shorthand)")
-
-	f.BoolVar(&p.extract, "extract", false, "extract a tar archive from the given directory")
-	f.BoolVar(&p.extract, "x", false, "extract a tar archive from the given directory (shorthand)")
-
-	f.StringVar(&p.file, "file", "", "tar file")
-	f.StringVar(&p.file, "f", "", "tar file (shorthand)")
-
-	f.BoolVar(&p.list, "list", false, "list the contents of an archive")
-	f.BoolVar(&p.list, "t", false, "list the contents of an archive (shorthand)")
-
-	f.BoolVar(&p.noRecursion, "no-recursion", false, "do not automatically recurse into directories")
-
-	f.BoolVar(&p.verbose, "verbose", false, "print each filename")
-	f.BoolVar(&p.verbose, "v", false, "print each filename (shorthand)")
-
-	f.Usage = func() {
-		fmt.Fprintf(f.Output(), "Usage of tar:\n")
-		f.PrintDefaults()
-	}
+	f := newFlagSet(&p, ioEnv.Stderr)
 
 	if err := f.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -200,4 +177,30 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh tar flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&params{}, io.Discard)
+}
+
+func newFlagSet(p *params, output io.Writer) *flag.FlagSet {
+	f := flag.NewFlagSet("tar", flag.ContinueOnError)
+	f.SetOutput(output)
+	f.BoolVar(&p.create, "create", false, "create a new tar archive from the given directory")
+	f.BoolVar(&p.create, "c", false, "create a new tar archive from the given directory (shorthand)")
+	f.BoolVar(&p.extract, "extract", false, "extract a tar archive from the given directory")
+	f.BoolVar(&p.extract, "x", false, "extract a tar archive from the given directory (shorthand)")
+	f.StringVar(&p.file, "file", "", "tar file")
+	f.StringVar(&p.file, "f", "", "tar file (shorthand)")
+	f.BoolVar(&p.list, "list", false, "list the contents of an archive")
+	f.BoolVar(&p.list, "t", false, "list the contents of an archive (shorthand)")
+	f.BoolVar(&p.noRecursion, "no-recursion", false, "do not automatically recurse into directories")
+	f.BoolVar(&p.verbose, "verbose", false, "print each filename")
+	f.BoolVar(&p.verbose, "v", false, "print each filename (shorthand)")
+	f.Usage = func() {
+		fmt.Fprintf(f.Output(), "Usage of tar:\n")
+		f.PrintDefaults()
+	}
+	return f
 }

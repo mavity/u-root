@@ -316,19 +316,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	f := &flags{}
-	fs := flag.NewFlagSet("id", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	fs.BoolVar(&f.group, "g", false, "print only the effective group ID")
-	fs.BoolVar(&f.group, "group", false, "print only the effective group ID")
-	fs.BoolVar(&f.groups, "G", false, "print all group IDs")
-	fs.BoolVar(&f.groups, "groups", false, "print all group IDs")
-	fs.BoolVar(&f.name, "n", false, "print a name instead of a number, for -ugG")
-	fs.BoolVar(&f.name, "name", false, "print a name instead of a number, for -ugG")
-	fs.BoolVar(&f.user, "u", false, "print only the effective user ID")
-	fs.BoolVar(&f.user, "user", false, "print only the effective user ID")
-	fs.BoolVar(&f.real, "r", false, "print real ID instead of effective ID")
-	fs.BoolVar(&f.real, "real", false, "print real ID instead of effective ID")
+	fs := newFlagSet(f, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -343,4 +331,25 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh id flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("id", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&f.group, "g", false, "print only the effective group ID")
+	fs.BoolVar(&f.group, "group", false, "print only the effective group ID")
+	fs.BoolVar(&f.groups, "G", false, "print all group IDs")
+	fs.BoolVar(&f.groups, "groups", false, "print all group IDs")
+	fs.BoolVar(&f.name, "n", false, "print a name instead of a number, for -ugG")
+	fs.BoolVar(&f.name, "name", false, "print a name instead of a number, for -ugG")
+	fs.BoolVar(&f.user, "u", false, "print only the effective user ID")
+	fs.BoolVar(&f.user, "user", false, "print only the effective user ID")
+	fs.BoolVar(&f.real, "r", false, "print real ID instead of effective ID")
+	fs.BoolVar(&f.real, "real", false, "print real ID instead of effective ID")
+	return fs
 }

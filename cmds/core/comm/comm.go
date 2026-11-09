@@ -158,12 +158,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var s1, s2, s3, help bool
-	fs := flag.NewFlagSet("comm", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&s1, "1", false, "suppress printing of column 1")
-	fs.BoolVar(&s2, "2", false, "suppress printing of column 2")
-	fs.BoolVar(&s3, "3", false, "suppress printing of column 3")
-	fs.BoolVar(&help, "h", false, "print this help message and exit")
+	fs := newFlagSet(&s1, &s2, &s3, &help, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -180,4 +175,20 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh comm flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var s1, s2, s3, help bool
+	return newFlagSet(&s1, &s2, &s3, &help, io.Discard)
+}
+
+func newFlagSet(s1, s2, s3, help *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("comm", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(s1, "1", false, "suppress printing of column 1")
+	fs.BoolVar(s2, "2", false, "suppress printing of column 2")
+	fs.BoolVar(s3, "3", false, "suppress printing of column 3")
+	fs.BoolVar(help, "h", false, "print this help message and exit")
+	return fs
 }

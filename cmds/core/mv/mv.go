@@ -181,22 +181,7 @@ func moveWithCtx(ctx context.Context, stderr io.Writer, args []string, resolvePa
 
 func moveWithIO(ctx context.Context, stdin io.Reader, stderr io.Writer, args []string, resolvePath func(string) string) error {
 	var f flags
-
-	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-
-	fs.BoolVar(&f.update, "u", false, "move only when the SOURCE file is newer than the destination file or when the destination file is missing")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteForce}, "f", "do not prompt before overwriting")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteForce}, "force", "do not prompt before overwriting")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteInteractive}, "i", "prompt before overwrite")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteInteractive}, "interactive", "prompt before overwrite")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteNoClobber}, "n", "do not overwrite an existing file")
-	fs.Var(overwriteFlag{flags: &f, mode: overwriteNoClobber}, "no-clobber", "do not overwrite an existing file")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: mv [ARGS] source target [ARGS] source ... directory\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&f, stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -264,4 +249,26 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh mv flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("mv", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&f.update, "u", false, "move only when the SOURCE file is newer than the destination file or when the destination file is missing")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteForce}, "f", "do not prompt before overwriting")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteForce}, "force", "do not prompt before overwriting")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteInteractive}, "i", "prompt before overwrite")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteInteractive}, "interactive", "prompt before overwrite")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteNoClobber}, "n", "do not overwrite an existing file")
+	fs.Var(overwriteFlag{flags: f, mode: overwriteNoClobber}, "no-clobber", "do not overwrite an existing file")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: mv [ARGS] source target [ARGS] source ... directory\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }

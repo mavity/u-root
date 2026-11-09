@@ -262,12 +262,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		skip      int64
 	)
 	maxBytes = -1
-	fs := flag.NewFlagSet("hexdump", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&canonical, "C", false, "canonical hex+ASCII display")
-	fs.BoolVar(&verbose, "v", false, "do not suppress repeated output lines")
-	fs.Int64Var(&maxBytes, "n", -1, "interpret only N bytes of input")
-	fs.Int64Var(&skip, "s", 0, "skip N bytes from the beginning")
+	fs := newFlagSet(&canonical, &verbose, &maxBytes, &skip, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -290,4 +285,22 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh hexdump flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var canonical, verbose bool
+	maxBytes := int64(-1)
+	var skip int64
+	return newFlagSet(&canonical, &verbose, &maxBytes, &skip, io.Discard)
+}
+
+func newFlagSet(canonical, verbose *bool, maxBytes, skip *int64, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("hexdump", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(canonical, "C", false, "canonical hex+ASCII display")
+	fs.BoolVar(verbose, "v", false, "do not suppress repeated output lines")
+	fs.Int64Var(maxBytes, "n", -1, "interpret only N bytes of input")
+	fs.Int64Var(skip, "s", 0, "skip N bytes from the beginning")
+	return fs
 }

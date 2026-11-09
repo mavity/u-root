@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path/filepath"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -17,9 +18,7 @@ import (
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var quiet bool
-	fs := flag.NewFlagSet("realpath", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&quiet, "q", false, "quiet mode")
+	fs := newFlagSet(&quiet, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -79,4 +78,17 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh realpath flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var quiet bool
+	return newFlagSet(&quiet, io.Discard)
+}
+
+func newFlagSet(quiet *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("realpath", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(quiet, "q", false, "quiet mode")
+	return fs
 }

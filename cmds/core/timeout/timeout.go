@@ -63,6 +63,22 @@ func (c *cmd) run() (int, error) {
 	return 0, nil
 }
 
+// NewFlagSetForCompletion returns a fresh timeout flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var timeoutVal time.Duration
+	var sigName string
+	return newFlagSet(&timeoutVal, &sigName, io.Discard)
+}
+
+func newFlagSet(timeoutVal *time.Duration, sigName *string, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("timeout", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.DurationVar(timeoutVal, "t", 0, "Timeout for command")
+	fs.StringVar(sigName, "signal", "TERM", "specify the signal to be sent on timeout")
+	fs.StringVar(sigName, "s", "TERM", "specify the signal to be sent on timeout")
+	return fs
+}
+
 func runCommand(ctx context.Context, ioEnv core.IO, timeoutVal time.Duration, sigName string, cmdArgs []string) (int, error) {
 	if len(cmdArgs) == 0 {
 		return 1, errNoArgs
@@ -119,11 +135,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 
 	var timeoutVal time.Duration
 	var sigName string
-	fs := flag.NewFlagSet("timeout", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.DurationVar(&timeoutVal, "t", 0, "Timeout for command")
-	fs.StringVar(&sigName, "signal", "TERM", "specify the signal to be sent on timeout")
-	fs.StringVar(&sigName, "s", "TERM", "specify the signal to be sent on timeout")
+	fs := newFlagSet(&timeoutVal, &sigName, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if !errors.Is(err, flag.ErrHelp) {

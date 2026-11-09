@@ -280,11 +280,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("tail", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	follow := fs.Bool("f", false, "follow the end of the file")
-	numLines := fs.Int64("n", 10, "output the last COUNT lines")
-	numBytes := fs.Int64("c", -1, "output the last COUNT bytes")
+	fs, follow, numLines, numBytes := newFlagSet(stderr)
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -349,10 +345,26 @@ func isBrokenPipe(err error) bool {
 	if err == nil {
 		return false
 	}
+
 	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) {
 		return true
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, "broken pipe") ||
 		strings.Contains(message, "pipe is being closed")
+}
+
+// NewFlagSetForCompletion returns a fresh tail flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	fs, _, _, _ := newFlagSet(io.Discard)
+	return fs
+}
+
+func newFlagSet(output io.Writer) (*flag.FlagSet, *bool, *int64, *int64) {
+	fs := flag.NewFlagSet("tail", flag.ContinueOnError)
+	fs.SetOutput(output)
+	follow := fs.Bool("f", false, "follow the end of the file")
+	numLines := fs.Int64("n", 10, "output the last COUNT lines")
+	numBytes := fs.Int64("c", -1, "output the last COUNT bytes")
+	return fs, follow, numLines, numBytes
 }

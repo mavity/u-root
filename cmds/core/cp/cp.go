@@ -279,6 +279,25 @@ func parseSparseMode(value string) (cp.SparseMode, error) {
 
 func parseArgs(args []string, out, errw io.Writer) (flags, []string, error) {
 	var f flags
+	fs := newFlagSet(&f, out, errw)
+	if err := fs.Parse(args); err != nil {
+		return f, nil, err
+	}
+	fs.SetOutput(out)
+	f.targetDirectorySet = fs.Changed("target-directory")
+	f.verbose = f.verbose || f.debug
+	if f.help {
+		fs.Usage()
+	}
+	return f, fs.Args(), nil
+}
+
+// NewFlagSetForCompletion returns a fresh cp flag definition.
+func NewFlagSetForCompletion() *pflag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard, io.Discard)
+}
+
+func newFlagSet(f *flags, out, errw io.Writer) *pflag.FlagSet {
 	fs := pflag.NewFlagSet("cp", pflag.ContinueOnError)
 	fs.SetOutput(errw)
 
@@ -356,16 +375,7 @@ func parseArgs(args []string, out, errw io.Writer) (flags, []string, error) {
 		fmt.Fprintln(out, "Usage: cp [OPTION]... SOURCE... DEST")
 		fs.PrintDefaults()
 	}
-	if err := fs.Parse(args); err != nil {
-		return f, nil, err
-	}
-	fs.SetOutput(out)
-	f.targetDirectorySet = fs.Changed("target-directory")
-	f.verbose = f.verbose || f.debug
-	if f.help {
-		fs.Usage()
-	}
-	return f, fs.Args(), nil
+	return fs
 }
 
 func sourcePathArgument(path string, stripTrailing bool) string {

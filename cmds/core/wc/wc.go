@@ -249,15 +249,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var p params
-	fs := flag.NewFlagSet("wc", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&p.lines, "l", false, "count lines")
-	fs.BoolVar(&p.words, "w", false, "count words")
-	fs.BoolVar(&p.runes, "r", false, "count runes")
-	fs.BoolVar(&p.runes, "m", false, "count characters")
-	fs.BoolVar(&p.broken, "b", false, "count broken")
-	fs.BoolVar(&p.chars, "c", false, "count bytes (include partial UTF)")
-	fs.BoolVar(&p.longestLine, "L", false, "print the length of the longest line")
+	fs := newFlagSet(&p, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -274,4 +266,22 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh wc flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&params{}, io.Discard)
+}
+
+func newFlagSet(p *params, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("wc", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&p.lines, "l", false, "count lines")
+	fs.BoolVar(&p.words, "w", false, "count words")
+	fs.BoolVar(&p.runes, "r", false, "count runes")
+	fs.BoolVar(&p.runes, "m", false, "count characters")
+	fs.BoolVar(&p.broken, "b", false, "count broken")
+	fs.BoolVar(&p.chars, "c", false, "count bytes (include partial UTF)")
+	fs.BoolVar(&p.longestLine, "L", false, "print the length of the longest line")
+	return fs
 }

@@ -164,10 +164,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("head", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	byteCount := fs.Int64("c", -1, "Print the first COUNT bytes of each file")
-	lineCount := fs.Int64("n", -1, "Print the first COUNT lines of each file")
+	fs, byteCount, lineCount := newFlagSet(ioEnv.Stderr)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -214,4 +211,18 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh head flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	fs, _, _ := newFlagSet(io.Discard)
+	return fs
+}
+
+func newFlagSet(output io.Writer) (*flag.FlagSet, *int64, *int64) {
+	fs := flag.NewFlagSet("head", flag.ContinueOnError)
+	fs.SetOutput(output)
+	byteCount := fs.Int64("c", -1, "Print the first COUNT bytes of each file")
+	lineCount := fs.Int64("n", -1, "Print the first COUNT lines of each file")
+	return fs, byteCount, lineCount
 }

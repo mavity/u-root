@@ -26,6 +26,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -133,31 +134,13 @@ func parseTimestamp(stamp string, now time.Time) (time.Time, error) {
 func parseCommand(ioEnv core.IO, args ...string) (*cmd, error) {
 	var c cmd
 	var b bytes.Buffer
-	fs := flag.NewFlagSet("touch", flag.ContinueOnError)
-	fs.SetOutput(&b)
-
 	var access bool
 	var modification bool
 	var create bool
 	var dateTime string
 	var stamp string
 	var reference string
-
-	fs.BoolVar(&access, "a", false, "change only the access time")
-	fs.BoolVar(&modification, "m", false, "change only the modification time")
-	fs.BoolVar(&create, "c", false, "do not create any file if it does not exist")
-	fs.StringVar(&dateTime, "d", "", "use specified time instead of current time RFC3339")
-	fs.StringVar(&stamp, "t", "", "use [[CC]YY]MMDDhhmm[.ss] instead of current time")
-	fs.StringVar(&reference, "r", "", "use this file's times instead of current time")
-	fs.StringVar(&reference, "reference", "", "use this file's times instead of current time")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: touch [-amc] [-d datetime | -t stamp | -r file] file...\n\n")
-		fmt.Fprintf(fs.Output(), "touch changes file access and modification times.\n")
-		fmt.Fprintf(fs.Output(), "If a file does not exist, it will be created unless -c is specified.\n\n")
-		fmt.Fprintf(fs.Output(), "Options:\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&access, &modification, &create, &dateTime, &stamp, &reference, &b)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return nil, err
@@ -176,6 +159,33 @@ func parseCommand(ioEnv core.IO, args ...string) (*cmd, error) {
 	}
 
 	return &c, nil
+}
+
+// NewFlagSetForCompletion returns a fresh touch flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var access, modification, create bool
+	var dateTime, stamp, reference string
+	return newFlagSet(&access, &modification, &create, &dateTime, &stamp, &reference, io.Discard)
+}
+
+func newFlagSet(access, modification, create *bool, dateTime, stamp, reference *string, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("touch", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(access, "a", false, "change only the access time")
+	fs.BoolVar(modification, "m", false, "change only the modification time")
+	fs.BoolVar(create, "c", false, "do not create any file if it does not exist")
+	fs.StringVar(dateTime, "d", "", "use specified time instead of current time RFC3339")
+	fs.StringVar(stamp, "t", "", "use [[CC]YY]MMDDhhmm[.ss] instead of current time")
+	fs.StringVar(reference, "r", "", "use this file's times instead of current time")
+	fs.StringVar(reference, "reference", "", "use this file's times instead of current time")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: touch [-amc] [-d datetime | -t stamp | -r file] file...\n\n")
+		fmt.Fprintf(fs.Output(), "touch changes file access and modification times.\n")
+		fmt.Fprintf(fs.Output(), "If a file does not exist, it will be created unless -c is specified.\n\n")
+		fmt.Fprintf(fs.Output(), "Options:\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 func (c *cmd) run(ctx context.Context, ioEnv core.IO) error {

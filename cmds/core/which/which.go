@@ -19,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path/filepath"
 	"runtime"
 
@@ -44,10 +45,7 @@ func findExecutable(p, name string) (string, bool) {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var allPaths, verbose bool
-	fs := flag.NewFlagSet("which", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&allPaths, "a", false, "print all matching pathnames of each argument")
-	fs.BoolVar(&verbose, "v", false, "verbose output")
+	fs := newFlagSet(&allPaths, &verbose, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -104,6 +102,20 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		return fmt.Errorf("no suitable executable found")
 	}
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh which flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var allPaths, verbose bool
+	return newFlagSet(&allPaths, &verbose, io.Discard)
+}
+
+func newFlagSet(allPaths, verbose *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("which", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(allPaths, "a", false, "print all matching pathnames of each argument")
+	fs.BoolVar(verbose, "v", false, "verbose output")
+	return fs
 }
 
 // Main runs the which command reentrantly.

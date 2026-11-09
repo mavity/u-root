@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 
@@ -44,19 +45,7 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		zero     bool
 	)
 
-	fs := flag.NewFlagSet("basename", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&multiple, "a", false, "support multiple arguments and treat each as a NAME")
-	fs.BoolVar(&multiple, "multiple", false, "support multiple arguments and treat each as a NAME")
-	fs.StringVar(&suffix, "s", "", "remove a trailing SUFFIX; implies -a")
-	fs.StringVar(&suffix, "suffix", "", "remove a trailing SUFFIX; implies -a")
-	fs.BoolVar(&zero, "z", false, "end each output line with NUL, not newline")
-	fs.BoolVar(&zero, "zero", false, "end each output line with NUL, not newline")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: basename NAME [SUFFIX]\n       basename OPTION... NAME...\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&multiple, &suffix, &zero, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -92,6 +81,29 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	default:
 		return errUsage
 	}
+}
+
+// NewFlagSetForCompletion returns a fresh basename flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var multiple, zero bool
+	var suffix string
+	return newFlagSet(&multiple, &suffix, &zero, io.Discard)
+}
+
+func newFlagSet(multiple *bool, suffix *string, zero *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("basename", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(multiple, "a", false, "support multiple arguments and treat each as a NAME")
+	fs.BoolVar(multiple, "multiple", false, "support multiple arguments and treat each as a NAME")
+	fs.StringVar(suffix, "s", "", "remove a trailing SUFFIX; implies -a")
+	fs.StringVar(suffix, "suffix", "", "remove a trailing SUFFIX; implies -a")
+	fs.BoolVar(zero, "z", false, "end each output line with NUL, not newline")
+	fs.BoolVar(zero, "zero", false, "end each output line with NUL, not newline")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: basename NAME [SUFFIX]\n       basename OPTION... NAME...\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the basename command reentrantly.

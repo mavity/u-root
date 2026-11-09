@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/rck/unit"
@@ -42,13 +43,7 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var rfile string
 	size := unit.MustNewUnit(unit.DefaultUnits).MustNewValue(1, unit.None)
 
-	fs := flag.NewFlagSet("truncate", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&noCreate, "c", false, "Do not create files.")
-	fs.BoolVar(&ioBlocks, "o", false, "Treat SIZE as number of IO blocks instead of bytes.")
-	fs.Var(size, "s", "Size in bytes, prefixes +/- are allowed")
-	fs.StringVar(&rfile, "r", "", "Reference file for size")
-	fs.Usage = util.Usage(fs.Usage, usage)
+	fs := newFlagSet(&noCreate, &ioBlocks, size, &rfile, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -110,6 +105,25 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		}
 	}
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh truncate flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var noCreate, ioBlocks bool
+	var rfile string
+	size := unit.MustNewUnit(unit.DefaultUnits).MustNewValue(1, unit.None)
+	return newFlagSet(&noCreate, &ioBlocks, size, &rfile, io.Discard)
+}
+
+func newFlagSet(noCreate, ioBlocks *bool, size flag.Value, rfile *string, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("truncate", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(noCreate, "c", false, "Do not create files.")
+	fs.BoolVar(ioBlocks, "o", false, "Treat SIZE as number of IO blocks instead of bytes.")
+	fs.Var(size, "s", "Size in bytes, prefixes +/- are allowed")
+	fs.StringVar(rfile, "r", "", "Reference file for size")
+	fs.Usage = util.Usage(fs.Usage, usage)
+	return fs
 }
 
 // Main runs the truncate command reentrantly.

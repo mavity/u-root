@@ -68,12 +68,7 @@ func verifyDetachedSignature(key *packet.PublicKey, contentf, sigf io.Reader) er
 }
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
-	fs := flag.NewFlagSet("gpgv", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: gpgv [options] key sig content\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -146,4 +141,19 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh gpgv flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(io.Discard)
+}
+
+func newFlagSet(output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("gpgv", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: gpgv [options] key sig content\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }

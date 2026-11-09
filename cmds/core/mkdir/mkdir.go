@@ -20,6 +20,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 
@@ -45,20 +46,7 @@ type flags struct {
 
 func mkdir(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
-
-	fs := flag.NewFlagSet("mkdir", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	fs.StringVar(&f.mode, "m", "", "Directory mode")
-	fs.BoolVar(&f.mkall, "p", false, "Make all needed directories in the path")
-	fs.BoolVar(&f.verbose, "v", false, "Print each directory as it is made")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: mkdir [-m mode] [-v] [-p] DIRECTORY...\n\n")
-		fmt.Fprintf(fs.Output(), "mkdir makes one or more new directories.\n\n")
-		fmt.Fprintf(fs.Output(), "Options:\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&f, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -119,6 +107,26 @@ func mkdir(ctx context.Context, ioEnv core.IO, args ...string) error {
 		}
 	}
 	return errs
+}
+
+// NewFlagSetForCompletion returns a fresh mkdir flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("mkdir", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.StringVar(&f.mode, "m", "", "Directory mode")
+	fs.BoolVar(&f.mkall, "p", false, "Make all needed directories in the path")
+	fs.BoolVar(&f.verbose, "v", false, "Print each directory as it is made")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: mkdir [-m mode] [-v] [-p] DIRECTORY...\n\n")
+		fmt.Fprintf(fs.Output(), "mkdir makes one or more new directories.\n\n")
+		fmt.Fprintf(fs.Output(), "Options:\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the mkdir command reentrantly.

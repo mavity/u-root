@@ -225,17 +225,13 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		maxBytes int64
 	)
 	maxBytes = -1
-	fs := flag.NewFlagSet("cmp", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&long, "l", false, "print the byte number (decimal) and the differing bytes (hexadecimal) for each difference")
-	fs.BoolVar(&line, "L", false, "print the line number of the first differing byte")
-	fs.BoolVar(&silent, "s", false, "print nothing for differing files, but set the exit status")
-	fs.Int64Var(&maxBytes, "n", -1, "compare at most N bytes")
+	fs := newFlagSet(&long, &line, &silent, &maxBytes, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
+
 		return 2
 	}
 
@@ -260,4 +256,21 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 130
 	}
 	return 2
+}
+
+// NewFlagSetForCompletion returns a fresh cmp flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var long, line, silent bool
+	maxBytes := int64(-1)
+	return newFlagSet(&long, &line, &silent, &maxBytes, io.Discard)
+}
+
+func newFlagSet(long, line, silent *bool, maxBytes *int64, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("cmp", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(long, "l", false, "print the byte number (decimal) and the differing bytes (hexadecimal) for each difference")
+	fs.BoolVar(line, "L", false, "print the line number of the first differing byte")
+	fs.BoolVar(silent, "s", false, "print nothing for differing files, but set the exit status")
+	fs.Int64Var(maxBytes, "n", -1, "compare at most N bytes")
+	return fs
 }

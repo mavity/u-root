@@ -19,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -57,10 +58,7 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 		physical bool
 	)
 
-	fs := flag.NewFlagSet("pwd", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&logical, "L", true, "don't follow any symlinks")
-	fs.BoolVar(&physical, "P", false, "follow all symlinks (avoid all symlinks)")
+	fs := newFlagSet(&logical, &physical, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -72,6 +70,21 @@ func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	}
 	_, err = fmt.Fprintln(ioEnv.Stdout, path)
 	return err
+}
+
+// NewFlagSetForCompletion returns a fresh pwd flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	logical := true
+	var physical bool
+	return newFlagSet(&logical, &physical, io.Discard)
+}
+
+func newFlagSet(logical, physical *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("pwd", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(logical, "L", true, "don't follow any symlinks")
+	fs.BoolVar(physical, "P", false, "follow all symlinks (avoid all symlinks)")
+	return fs
 }
 
 // Main runs the pwd command reentrantly.

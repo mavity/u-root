@@ -104,16 +104,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		}
 	}()
 
-	fs := flag.NewFlagSet("uname", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	all := fs.Bool("a", false, "print everything")
-	kernel := fs.Bool("s", false, "print the kernel name")
-	node := fs.Bool("n", false, "print the network node name")
-	release := fs.Bool("r", false, "print the kernel release")
-	version := fs.Bool("v", false, "print the kernel version")
-	machine := fs.Bool("m", false, "print the machine hardware name")
-	processor := fs.Bool("p", false, "print the machine hardware name")
+	fs, all, kernel, node, release, version, machine, processor := newFlagSet(ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -128,4 +119,23 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh uname flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	fs, _, _, _, _, _, _, _ := newFlagSet(io.Discard)
+	return fs
+}
+
+func newFlagSet(output io.Writer) (*flag.FlagSet, *bool, *bool, *bool, *bool, *bool, *bool, *bool) {
+	fs := flag.NewFlagSet("uname", flag.ContinueOnError)
+	fs.SetOutput(output)
+	all := fs.Bool("a", false, "print everything")
+	kernel := fs.Bool("s", false, "print the kernel name")
+	node := fs.Bool("n", false, "print the network node name")
+	release := fs.Bool("r", false, "print the kernel release")
+	version := fs.Bool("v", false, "print the kernel version")
+	machine := fs.Bool("m", false, "print the machine hardware name")
+	processor := fs.Bool("p", false, "print the machine hardware name")
+	return fs, all, kernel, node, release, version, machine, processor
 }

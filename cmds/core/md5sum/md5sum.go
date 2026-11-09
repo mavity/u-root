@@ -95,11 +95,7 @@ func checkMd5File(ctx context.Context, ioEnv core.IO, listFile string) error {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var check bool
-	fs := flag.NewFlagSet("md5sum", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&check, "c", false, "read MD5 sums from the FILEs and check them")
-	fs.BoolVar(&check, "check", false, "read MD5 sums from the FILEs and check them")
-	fs.Usage = util.Usage(fs.Usage, usage)
+	fs := newFlagSet(&check, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -177,4 +173,19 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh md5sum flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var check bool
+	return newFlagSet(&check, io.Discard)
+}
+
+func newFlagSet(check *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("md5sum", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(check, "c", false, "read MD5 sums from the FILEs and check them")
+	fs.BoolVar(check, "check", false, "read MD5 sums from the FILEs and check them")
+	fs.Usage = util.Usage(fs.Usage, usage)
+	return fs
 }

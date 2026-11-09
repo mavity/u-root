@@ -775,6 +775,11 @@ func newFlagSet(name string, c *cmd, output io.Writer) *flag.FlagSet {
 	return f
 }
 
+// NewFlagSetForCompletion returns a fresh ls flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet("ls", &cmd{}, io.Discard)
+}
+
 type stringList []string
 
 func (s *stringList) String() string { return strings.Join(*s, ",") }

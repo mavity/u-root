@@ -286,15 +286,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var p params
-	fs := flag.NewFlagSet("sort", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&p.reverse, "r", false, "Reverse the result of comparisons.")
-	fs.BoolVar(&p.ordered, "C", false, "Check that the single input file is ordered. No warnings.")
-	fs.BoolVar(&p.unique, "u", false, "Unique keys. Suppress all lines that have a key that is equal to an already processed one.")
-	fs.BoolVar(&p.ignoreCase, "f", false, "Fold lower case to upper case character.")
-	fs.BoolVar(&p.ignoreBlanks, "b", false, "Ignore leading blank characters when comparing lines.")
-	fs.BoolVar(&p.numeric, "n", false, "Compare according to string numerical value.")
-	fs.StringVar(&p.outputFile, "o", "", "Specify the name of an output file to be used instead of the standard output.")
+	fs := newFlagSet(&p, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -314,4 +306,22 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh sort flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&params{}, io.Discard)
+}
+
+func newFlagSet(p *params, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("sort", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&p.reverse, "r", false, "Reverse the result of comparisons.")
+	fs.BoolVar(&p.ordered, "C", false, "Check that the single input file is ordered. No warnings.")
+	fs.BoolVar(&p.unique, "u", false, "Unique keys. Suppress all lines that have a key that is equal to an already processed one.")
+	fs.BoolVar(&p.ignoreCase, "f", false, "Fold lower case to upper case character.")
+	fs.BoolVar(&p.ignoreBlanks, "b", false, "Ignore leading blank characters when comparing lines.")
+	fs.BoolVar(&p.numeric, "n", false, "Compare according to string numerical value.")
+	fs.StringVar(&p.outputFile, "o", "", "Specify the name of an output file to be used instead of the standard output.")
+	return fs
 }

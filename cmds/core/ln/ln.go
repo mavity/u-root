@@ -31,6 +31,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -121,20 +122,7 @@ func (conf config) dereferTarget(ioEnv core.IO, target string) (string, error) {
 // run controls link creation with flag handling and path virtualization.
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var conf config
-	fs := flag.NewFlagSet("ln", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	fs.BoolVar(&conf.symlink, "s", false, "make symbolic links instead of hard links")
-	fs.BoolVar(&conf.verbose, "v", false, "print name of each linked file")
-	fs.BoolVar(&conf.force, "f", false, "remove destination files")
-	fs.BoolVar(&conf.nondir, "T", false, "treat linkname operand as a non-dir always")
-	fs.BoolVar(&conf.nondir, "n", false, "do not dereference destination symlink to a directory")
-	fs.BoolVar(&conf.prompt, "i", false, "prompt if the user wants overwrite")
-	fs.BoolVar(&conf.logical, "L", false, "dereference targets if are symbolic links")
-	fs.BoolVar(&conf.physical, "P", false, "make hard links directly to symbolic links")
-	fs.BoolVar(&conf.relative, "r", false, "create symlinks relative to link location")
-	fs.StringVar(&conf.dirtgt, "t", "", "specify the directory to put the links")
-	fs.StringVar(&conf.targetKind, "target-kind", "", "symbolic-link target kind: file or directory")
+	fs := newFlagSet(&conf, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -251,4 +239,26 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh ln flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&config{}, io.Discard)
+}
+
+func newFlagSet(conf *config, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("ln", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&conf.symlink, "s", false, "make symbolic links instead of hard links")
+	fs.BoolVar(&conf.verbose, "v", false, "print name of each linked file")
+	fs.BoolVar(&conf.force, "f", false, "remove destination files")
+	fs.BoolVar(&conf.nondir, "T", false, "treat linkname operand as a non-dir always")
+	fs.BoolVar(&conf.nondir, "n", false, "do not dereference destination symlink to a directory")
+	fs.BoolVar(&conf.prompt, "i", false, "prompt if the user wants overwrite")
+	fs.BoolVar(&conf.logical, "L", false, "dereference targets if are symbolic links")
+	fs.BoolVar(&conf.physical, "P", false, "make hard links directly to symbolic links")
+	fs.BoolVar(&conf.relative, "r", false, "create symlinks relative to link location")
+	fs.StringVar(&conf.dirtgt, "t", "", "specify the directory to put the links")
+	fs.StringVar(&conf.targetKind, "target-kind", "", "symbolic-link target kind: file or directory")
+	return fs
 }

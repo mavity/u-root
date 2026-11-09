@@ -14,6 +14,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -63,29 +64,7 @@ func setHostname(ctx context.Context, ioEnv core.IO, name string) error {
 
 func run(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
-	fs := flag.NewFlagSet("hostname", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	fs.BoolVar(&f.short, "s", false, "display short host name")
-	fs.BoolVar(&f.short, "short", false, "display short host name")
-
-	fs.BoolVar(&f.domain, "d", false, "display DNS domain name")
-	fs.BoolVar(&f.domain, "domain", false, "display DNS domain name")
-
-	fs.BoolVar(&f.fqdn, "f", false, "display fully qualified host name (FQDN)")
-	fs.BoolVar(&f.fqdn, "fqdn", false, "display fully qualified host name (FQDN)")
-	fs.BoolVar(&f.fqdn, "long", false, "display fully qualified host name (FQDN)")
-
-	fs.BoolVar(&f.ip, "i", false, "display IP address for the host name")
-	fs.BoolVar(&f.ip, "ip-address", false, "display IP address for the host name")
-
-	fs.StringVar(&f.file, "F", "", "set host name from given file")
-	fs.StringVar(&f.file, "file", "", "set host name from given file")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: hostname [-s|-d|-f|-i] [-F file] [HOSTNAME]\n\n")
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&f, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -159,4 +138,30 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh hostname flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("hostname", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&f.short, "s", false, "display short host name")
+	fs.BoolVar(&f.short, "short", false, "display short host name")
+	fs.BoolVar(&f.domain, "d", false, "display DNS domain name")
+	fs.BoolVar(&f.domain, "domain", false, "display DNS domain name")
+	fs.BoolVar(&f.fqdn, "f", false, "display fully qualified host name (FQDN)")
+	fs.BoolVar(&f.fqdn, "fqdn", false, "display fully qualified host name (FQDN)")
+	fs.BoolVar(&f.fqdn, "long", false, "display fully qualified host name (FQDN)")
+	fs.BoolVar(&f.ip, "i", false, "display IP address for the host name")
+	fs.BoolVar(&f.ip, "ip-address", false, "display IP address for the host name")
+	fs.StringVar(&f.file, "F", "", "set host name from given file")
+	fs.StringVar(&f.file, "file", "", "set host name from given file")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "Usage: hostname [-s|-d|-f|-i] [-F file] [HOSTNAME]\n\n")
+		fs.PrintDefaults()
+	}
+	return fs
 }

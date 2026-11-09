@@ -170,14 +170,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		skipFields int
 		skipChars  int
 	)
-	fs := flag.NewFlagSet("uniq", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&unique, "u", false, "print unique lines")
-	fs.BoolVar(&duplicates, "d", false, "print one copy of duplicated lines")
-	fs.BoolVar(&count, "c", false, "prefix a repetition count and a tab for each output line")
-	fs.BoolVar(&ignoreCase, "i", false, "case insensitive comparison of lines")
-	fs.IntVar(&skipFields, "f", 0, "avoid comparing the first N fields")
-	fs.IntVar(&skipChars, "s", 0, "avoid comparing the first N characters")
+	fs := newFlagSet(&unique, &duplicates, &count, &ignoreCase, &skipFields, &skipChars, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -198,4 +191,23 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh uniq flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var unique, duplicates, count, ignoreCase bool
+	var skipFields, skipChars int
+	return newFlagSet(&unique, &duplicates, &count, &ignoreCase, &skipFields, &skipChars, io.Discard)
+}
+
+func newFlagSet(unique, duplicates, count, ignoreCase *bool, skipFields, skipChars *int, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("uniq", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(unique, "u", false, "print unique lines")
+	fs.BoolVar(duplicates, "d", false, "print one copy of duplicated lines")
+	fs.BoolVar(count, "c", false, "prefix a repetition count and a tab for each output line")
+	fs.BoolVar(ignoreCase, "i", false, "case insensitive comparison of lines")
+	fs.IntVar(skipFields, "f", 0, "avoid comparing the first N fields")
+	fs.IntVar(skipChars, "s", 0, "avoid comparing the first N characters")
+	return fs
 }

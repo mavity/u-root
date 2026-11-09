@@ -128,12 +128,7 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 	}()
 
 	var cat, ignore bool
-	fs := flag.NewFlagSet("tee", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-	fs.BoolVar(&cat, "append", false, "append the output to the files rather than rewriting them")
-	fs.BoolVar(&cat, "a", false, "append the output to the files rather than rewriting them")
-	fs.BoolVar(&ignore, "ignore-interrupts", false, "ignore the SIGINT signal")
-	fs.BoolVar(&ignore, "i", false, "ignore the SIGINT signal")
+	fs := newFlagSet(&cat, &ignore, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -150,4 +145,20 @@ func Main(ctx context.Context, ioEnv core.IO, args ...string) (exitCode int) {
 		return 1
 	}
 	return 0
+}
+
+// NewFlagSetForCompletion returns a fresh tee flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	var cat, ignore bool
+	return newFlagSet(&cat, &ignore, io.Discard)
+}
+
+func newFlagSet(cat, ignore *bool, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("tee", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(cat, "append", false, "append the output to the files rather than rewriting them")
+	fs.BoolVar(cat, "a", false, "append the output to the files rather than rewriting them")
+	fs.BoolVar(ignore, "ignore-interrupts", false, "ignore the SIGINT signal")
+	fs.BoolVar(ignore, "i", false, "ignore the SIGINT signal")
+	return fs
 }

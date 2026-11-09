@@ -23,6 +23,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/u-root/u-root/pkg/core"
@@ -41,20 +42,7 @@ type flags struct {
 
 func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
 	var f flags
-	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
-	fs.SetOutput(ioEnv.Stderr)
-
-	fs.BoolVar(&f.interactive, "i", false, "Interactive mode.")
-	fs.BoolVar(&f.verbose, "v", false, "Verbose mode.")
-	fs.BoolVar(&f.recursive, "r", false, "equivalent to -R")
-	fs.BoolVar(&f.recursive, "R", false, "Recursive, remove hierarchies")
-	fs.BoolVar(&f.force, "f", false, "Force, ignore nonexistent files and never prompt")
-	fs.BoolVar(&f.directory, "d", false, "remove empty directories")
-
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "%s...\n", errUsage)
-		fs.PrintDefaults()
-	}
+	fs := newFlagSet(&f, ioEnv.Stderr)
 
 	if err := fs.Parse(unixflag.ArgsToGoArgs(args)); err != nil {
 		return err
@@ -114,6 +102,27 @@ func rm(ctx context.Context, ioEnv core.IO, args ...string) error {
 		}
 	}
 	return nil
+}
+
+// NewFlagSetForCompletion returns a fresh rm flag definition.
+func NewFlagSetForCompletion() *flag.FlagSet {
+	return newFlagSet(&flags{}, io.Discard)
+}
+
+func newFlagSet(f *flags, output io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.BoolVar(&f.interactive, "i", false, "Interactive mode.")
+	fs.BoolVar(&f.verbose, "v", false, "Verbose mode.")
+	fs.BoolVar(&f.recursive, "r", false, "equivalent to -R")
+	fs.BoolVar(&f.recursive, "R", false, "Recursive, remove hierarchies")
+	fs.BoolVar(&f.force, "f", false, "Force, ignore nonexistent files and never prompt")
+	fs.BoolVar(&f.directory, "d", false, "remove empty directories")
+	fs.Usage = func() {
+		fmt.Fprintf(fs.Output(), "%s...\n", errUsage)
+		fs.PrintDefaults()
+	}
+	return fs
 }
 
 // Main runs the rm command reentrantly.
